@@ -29,3 +29,6 @@ Thumbs.db
 tmp/
 *.tmp
 *.log
+
+# CodeWhale runtime
+.codewhale/

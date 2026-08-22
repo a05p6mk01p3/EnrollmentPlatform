@@ -1,0 +1,11 @@
+# oapi-codegen v2.8.0 configuration.
+# OpenAPI 3.1 support starts at github.com/oapi-codegen/oapi-codegen/v2 v2.8.0.
+# Pin is enforced by the Makefile (generate target).
+package: openapi
+output: internal/generated/openapi/api.gen.go
+generate:
+  models: true
+  embedded-spec: true
+  chi-server: true
+  strict-server: true
+  client: true
