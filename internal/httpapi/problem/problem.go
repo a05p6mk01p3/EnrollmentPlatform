@@ -20,6 +20,7 @@ const (
 	TypePayloadTooLarge        = "https://pki.example/errors/payload-too-large"
 	TypeUnsupportedMediaType   = "https://pki.example/errors/unsupported-media-type"
 	TypeAuthenticationRequired = "https://pki.example/errors/authentication-required"
+	TypeDependencyUnavailable  = "https://pki.example/errors/dependency-unavailable"
 	// TypeInternalError is infrastructure-only (server bug); it is not a
 	// contract machine code and must not be relied upon by clients.
 	TypeInternalError = "https://pki.example/errors/internal-error"
@@ -132,9 +133,8 @@ func WriteUnsupportedMediaType(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// WriteUnauthorizedBearer emits 401 with WWW-Authenticate: Bearer.
-// Authentication itself is not implemented yet; this is the infrastructure to
-// emit the header correctly (Protocol v0.2.2 §4.2).
+// WriteUnauthorizedBearer emits 401 AUTHENTICATION_REQUIRED with
+// WWW-Authenticate: Bearer (Protocol v0.2.2 §4.2).
 func WriteUnauthorizedBearer(w http.ResponseWriter, r *http.Request) {
 	Write(w, r, Problem{
 		Type:            TypeAuthenticationRequired,
@@ -142,6 +142,30 @@ func WriteUnauthorizedBearer(w http.ResponseWriter, r *http.Request) {
 		Status:          http.StatusUnauthorized,
 		ErrorCode:       "AUTHENTICATION_REQUIRED",
 		WWWAuthenticate: "Bearer",
+	})
+}
+
+// WriteUnauthorized emits 401 AUTHENTICATION_REQUIRED without a
+// WWW-Authenticate header (for authentication failures that are not bearer
+// credential challenges).
+func WriteUnauthorized(w http.ResponseWriter, r *http.Request) {
+	Write(w, r, Problem{
+		Type:      TypeAuthenticationRequired,
+		Title:     "Authentication required",
+		Status:    http.StatusUnauthorized,
+		ErrorCode: "AUTHENTICATION_REQUIRED",
+	})
+}
+
+// WriteServiceUnavailable emits 503 DEPENDENCY_UNAVAILABLE (retryable), the
+// contracted response for a dependency the platform needs but cannot reach.
+func WriteServiceUnavailable(w http.ResponseWriter, r *http.Request) {
+	Write(w, r, Problem{
+		Type:      TypeDependencyUnavailable,
+		Title:     "Dependency unavailable",
+		Status:    http.StatusServiceUnavailable,
+		ErrorCode: "DEPENDENCY_UNAVAILABLE",
+		Retryable: true,
 	})
 }
 

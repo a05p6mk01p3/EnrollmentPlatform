@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	authpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/policy"
+	authruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
@@ -150,10 +152,145 @@ const (
 	validEnrollmentBody = `{"operation":"INITIAL","certificate_usage":"PARTNER_AUTH"}`
 )
 
+// m3BearerToken returns the deterministic harness bearer token for a kind.
+func m3BearerToken(kind authpolicy.CredentialKind) string {
+	return "m3-token-" + string(kind)
+}
+
+// testAuthnRegistry returns a deterministic registry whose bearer kinds each
+// authenticate ONLY their own deterministic token, and whose DeviceMTLS kind
+// accepts any device credential. One arbitrary bearer token can never
+// authenticate as multiple kinds (SOL-M4.2-003), so multi-bearer-kind routes
+// do not trigger artificial ambiguity.
+func testAuthnRegistry() *authruntime.Registry {
+	var auths []authruntime.Authenticator
+	for _, kind := range []authpolicy.CredentialKind{
+		authpolicy.CredentialKindHumanOIDC,
+		authpolicy.CredentialKindAdminOIDC,
+		authpolicy.CredentialKindTemporaryPrincipalToken,
+		authpolicy.CredentialKindRequestAccessToken,
+		authpolicy.CredentialKindEnrollmentAccessToken,
+	} {
+		want := m3BearerToken(kind)
+		auths = append(auths, authruntime.BearerTestAuthenticator{
+			KindValue: kind,
+			Decide: func(token string) authruntime.Decision {
+				if token == want {
+					return authruntime.DecisionAuthenticated
+				}
+				return authruntime.DecisionRejected
+			},
+		})
+	}
+	auths = append(auths, authruntime.DeviceTestAuthenticator{
+		Decide: func(device *authruntime.DeviceCredential) authruntime.Decision {
+			if device == nil {
+				return authruntime.DecisionRejected
+			}
+			return authruntime.DecisionAuthenticated
+		},
+	})
+	r, err := authruntime.NewRegistry(auths...)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+// testDeviceSource always provides a device credential (deterministic double).
+func testDeviceSource() authruntime.DeviceMTLSSource {
+	return authruntime.DeviceTestSource{Credential: func(r *http.Request) *authruntime.DeviceCredential {
+		return &authruntime.DeviceCredential{}
+	}}
+}
+
+// m3RouteTokens derives, once, the deterministic harness bearer token for
+// every contract route that has exactly one eligible bearer CredentialKind.
+// Public routes and multi-bearer-kind routes are omitted; those tests pass an
+// explicit Authorization header.
+var m3RouteTokens = sync.OnceValue(func() map[string]string {
+	spec, err := openapi.GetSpec()
+	if err != nil {
+		return nil
+	}
+	pol, err := authpolicy.Compile(spec)
+	if err != nil {
+		return nil
+	}
+	m := map[string]string{}
+	for _, op := range pol.Operations() {
+		if op.NoApplicationCredential() {
+			continue
+		}
+		var bearer []authpolicy.CredentialKind
+		for _, alt := range op.Alternatives() {
+			for _, k := range alt.Kinds() {
+				if k != authpolicy.CredentialKindDeviceMTLS {
+					bearer = appendUniqueKind(bearer, k)
+				}
+			}
+		}
+		if len(bearer) == 1 {
+			m[strings.ToUpper(op.Method())+" "+op.Path()] = m3BearerToken(bearer[0])
+		}
+	}
+	return m
+})
+
+// m3TokenForRoute resolves the harness bearer token for a concrete method and
+// path, matching the spec path templates (exact first, then template).
+func m3TokenForRoute(method, path string) string {
+	path = strings.SplitN(path, "?", 2)[0]
+	method = strings.ToUpper(method)
+	key := method + " " + path
+	if tok, ok := m3RouteTokens()[key]; ok {
+		return tok
+	}
+	for key, tok := range m3RouteTokens() {
+		sep := strings.IndexByte(key, ' ')
+		if sep < 0 || key[:sep] != method {
+			continue
+		}
+		if templateMatches(key[sep+1:], path) {
+			return tok
+		}
+	}
+	return ""
+}
+
+func templateMatches(template, concrete string) bool {
+	t := strings.Split(strings.Trim(template, "/"), "/")
+	c := strings.Split(strings.Trim(concrete, "/"), "/")
+	if len(t) != len(c) {
+		return false
+	}
+	for i := range t {
+		if strings.HasPrefix(t[i], "{") && strings.HasSuffix(t[i], "}") {
+			continue
+		}
+		if t[i] != c[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func appendUniqueKind(kinds []authpolicy.CredentialKind, k authpolicy.CredentialKind) []authpolicy.CredentialKind {
+	for _, x := range kinds {
+		if x == k {
+			return kinds
+		}
+	}
+	return append(kinds, k)
+}
+
 func newTestHandler(t testing.TB) (http.Handler, *probeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
-	srv, err := httpapi.NewServer(cfg)
+	srv, err := httpapi.NewServer(cfg,
+		httpapi.WithAuthnRegistry(testAuthnRegistry()),
+		httpapi.WithDeviceMTLSSource(testDeviceSource()),
+	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -168,6 +305,14 @@ func do(t testing.TB, h http.Handler, method, path, body string, headers map[str
 		rd = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, path, rd)
+	if _, ok := headers["Authorization"]; !ok {
+		// M4.2 authenticates before M3 enforcement; authenticated routes need
+		// a kind-specific credential to reach the M3 boundary under test. The
+		// token is derived from the contract route (not a handwritten table).
+		if tok := m3TokenForRoute(method, path); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -342,6 +487,7 @@ func TestPayloadTooLargeChunked(t *testing.T) {
 	req.ContentLength = -1
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", validIdempotencyKey)
+	req.Header.Set("Authorization", "Bearer "+m3TokenForRoute("POST", "/v1/enrollments"))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -429,6 +575,7 @@ func TestMissingRequiredBodyRejected(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/enrollments", nil)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", validIdempotencyKey)
+	req.Header.Set("Authorization", "Bearer "+m3TokenForRoute("POST", "/v1/enrollments"))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 

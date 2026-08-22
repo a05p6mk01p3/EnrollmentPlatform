@@ -159,6 +159,7 @@ func TestEarlyEOFRejected(t *testing.T) {
 	req.ContentLength = 100
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", validIdempotencyKey)
+	req.Header.Set("Authorization", "Bearer "+m3TokenForRoute("POST", "/v1/enrollments"))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -260,6 +261,7 @@ func TestContentTypeCardinality(t *testing.T) {
 		req.Header.Add("Content-Type", "application/json")
 		req.Header.Add("Content-Type", "application/xml")
 		req.Header.Set("Idempotency-Key", validIdempotencyKey)
+		req.Header.Set("Authorization", "Bearer "+m3TokenForRoute("POST", "/v1/enrollments"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		if rr.Code != http.StatusUnsupportedMediaType {
@@ -276,6 +278,7 @@ func TestContentTypeCardinality(t *testing.T) {
 		req.Header.Add("Content-Type", "application/json")
 		req.Header.Add("Content-Type", "application/json")
 		req.Header.Set("Idempotency-Key", validIdempotencyKey)
+		req.Header.Set("Authorization", "Bearer "+m3TokenForRoute("POST", "/v1/enrollments"))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		if rr.Code != http.StatusUnsupportedMediaType {
