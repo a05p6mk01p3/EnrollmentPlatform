@@ -239,8 +239,194 @@ func (rt *Runtime) ConditionalAuthentication() func(http.Handler) http.Handler {
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			// Publish the effective conditional requirement so the following
+			// resource-binding step validates ONLY the required credential
+			// (SOL-M4.3-002). Extra authenticated credentials must not veto.
+			// The requirement is re-validated against the compiled policy by
+			// the resource-binding step; it is not trusted blindly.
+			next.ServeHTTP(w, r.WithContext(withConditionalRequirement(r.Context(), newConditionalRequirement(cond.Discriminator(), value, required))))
 		})
+	}
+}
+
+// ResourceBinding enforces that a capability credential authenticated for one
+// resource cannot access a different resource. It runs after Phase B (in the
+// composed pipeline) and before the business handler.
+//
+// Resource validation follows the EFFECTIVE policy, not a universal veto
+// (SOL-M4.3-002), and the compiled M4.1 OperationPolicy is the authority
+// (SOL-M4.3-002 final):
+//
+//   - For a conditional operation, Phase B must have published a trusted
+//     ConditionalRequirement that exactly agrees with the compiled
+//     ConditionalSecurity (discriminator, case, required kind, singleton).
+//     A missing, stale, or inconsistent requirement is an internal
+//     boundary-integrity failure and never falls back to base-OR
+//     validation. Only the effective required credential is
+//     resource-validated; extra authenticated capabilities never veto.
+//   - For a non-conditional operation, an unexpected conditional
+//     requirement is an integrity inconsistency and fails closed. Each
+//     satisfied OR alternative is resource-validated independently: an
+//     alternative is resource-valid when every capability member's binding
+//     matches the route resource, and the operation passes when at least
+//     one complete alternative is both authenticated and resource-valid.
+//
+// It is generic: it consumes the matched chi path parameters, the typed
+// capability bindings in the AuthenticationContext and the typed conditional
+// requirement, with no handwritten operationId table and no parsing of raw
+// URL strings. The contract names the capability resource path parameter
+// "id" in every capability-resource operation.
+func (rt *Runtime) ResourceBinding() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ac, ok := AuthenticationContextFrom(r.Context())
+			if !ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			rctx := chi.RouteContext(r.Context())
+			if rctx == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			policy, ok := rt.resolve(r.Method, rctx.RoutePattern())
+			if !ok {
+				problem.WriteInternal(w, r)
+				return
+			}
+			id, hasID := pathParam(rctx, "id")
+			cr, hasCR := conditionalRequirementFrom(r.Context())
+
+			switch evaluateResourceBinding(policy, ac, cr, hasCR, id, hasID) {
+			case resourceBindingPass:
+				next.ServeHTTP(w, r)
+			case resourceBindingUnauthorized:
+				// Same generic 401 as any other capability failure: no resource
+				// oracle beyond the authentication challenge.
+				problem.WriteUnauthorizedBearer(w, r)
+			default:
+				// Internal boundary-integrity failure: no detail, no fallback
+				// to base-OR validation, no guessed credential.
+				problem.WriteInternal(w, r)
+			}
+		})
+	}
+}
+
+// resourceBindingDecision is the outcome of resource-binding validation.
+type resourceBindingDecision int
+
+const (
+	resourceBindingPass resourceBindingDecision = iota
+	resourceBindingUnauthorized
+	resourceBindingIntegrity
+)
+
+// evaluateResourceBinding applies the SOL-M4.3-002 final semantics, treating
+// the compiled OperationPolicy as the authority.
+func evaluateResourceBinding(policy *authpolicy.OperationPolicy, ac *AuthenticationContext, cr *ConditionalRequirement, hasCR bool, id string, hasID bool) resourceBindingDecision {
+	if policy.Conditional() != nil {
+		// Conditional operation: the trusted Phase-B requirement must exist
+		// and agree with the compiled ConditionalSecurity.
+		if !hasCR {
+			return resourceBindingIntegrity
+		}
+		kind, ok := validatedRequiredKind(policy, ac, cr)
+		if !ok {
+			return resourceBindingIntegrity
+		}
+		if !capabilityResourceMatches(ac, kind, id, hasID) {
+			return resourceBindingUnauthorized
+		}
+		return resourceBindingPass
+	}
+
+	// Non-conditional operation: an unexpected requirement is an integrity
+	// inconsistency and must not influence evaluation.
+	if hasCR {
+		return resourceBindingIntegrity
+	}
+	if !resourceValidForAlternatives(ac, id, hasID) {
+		return resourceBindingUnauthorized
+	}
+	return resourceBindingPass
+}
+
+// validatedRequiredKind checks the conditional requirement against the
+// compiled policy and returns the effective required kind. Any mismatch is an
+// integrity failure (ok=false): missing/malformed/stale/inconsistent
+// requirements never fall back to base-OR validation.
+func validatedRequiredKind(policy *authpolicy.OperationPolicy, ac *AuthenticationContext, cr *ConditionalRequirement) (authpolicy.CredentialKind, bool) {
+	if ac.OperationID() != policy.OperationID() {
+		return "", false
+	}
+	cond := policy.Conditional()
+	if cond == nil {
+		return "", false
+	}
+	if cr.Discriminator() != cond.Discriminator() {
+		return "", false
+	}
+	requirement, ok := cond.RequirementFor(cr.DiscriminatorValue())
+	if !ok {
+		return "", false
+	}
+	kinds := requirement.Kinds()
+	if len(kinds) != 1 {
+		return "", false
+	}
+	if cr.RequiredKind() != kinds[0] {
+		return "", false
+	}
+	return kinds[0], true
+}
+
+// resourceValidForAlternatives evaluates the per-satisfied-alternative
+// resource constraints of a non-conditional operation: at least one complete
+// alternative must be resource-valid.
+func resourceValidForAlternatives(ac *AuthenticationContext, id string, hasID bool) bool {
+	for _, alt := range ac.SatisfiedAlternatives() {
+		valid := true
+		for _, k := range alt.Kinds() {
+			if !capabilityResourceMatches(ac, k, id, hasID) {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return true
+		}
+	}
+	return false
+}
+
+// capabilityResourceMatches reports whether the given credential kind's
+// binding (when it is a capability kind) matches the route resource id. A
+// non-capability kind has no resource constraint and always matches.
+func capabilityResourceMatches(ac *AuthenticationContext, kind authpolicy.CredentialKind, id string, hasID bool) bool {
+	switch kind {
+	case authpolicy.CredentialKindRequestAccessToken:
+		b, ok := ac.Binding(kind)
+		if !ok {
+			return false
+		}
+		req, ok := b.RequestAccess()
+		if !ok {
+			return false
+		}
+		return !hasID || req.PreOnboardingRequestID == id
+	case authpolicy.CredentialKindEnrollmentAccessToken:
+		b, ok := ac.Binding(kind)
+		if !ok {
+			return false
+		}
+		enr, ok := b.EnrollmentAccess()
+		if !ok {
+			return false
+		}
+		return !hasID || enr.EnrollmentID == id
+	default:
+		return true
 	}
 }
 
@@ -530,6 +716,20 @@ func validateBinding(kind authpolicy.CredentialKind, b *Binding) error {
 // and the spec-derived index (same convention as the M3 enforcer).
 func routeKey(method, pathPattern string) string {
 	return strings.ToUpper(method) + " " + pathPattern
+}
+
+// pathParam returns a matched path parameter value by name from chi's route
+// context.
+func pathParam(rctx *chi.Context, name string) (string, bool) {
+	if rctx == nil {
+		return "", false
+	}
+	for i, k := range rctx.URLParams.Keys {
+		if k == name {
+			return rctx.URLParams.Values[i], true
+		}
+	}
+	return "", false
 }
 
 func minInt64(a, b int64) int64 {

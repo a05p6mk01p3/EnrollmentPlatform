@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
 	authpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/policy"
 )
 
@@ -351,7 +353,7 @@ type BearerTestAuthenticator struct {
 func (a BearerTestAuthenticator) Kind() authpolicy.CredentialKind { return a.KindValue }
 
 // Authenticate evaluates the bearer token.
-func (a BearerTestAuthenticator) Authenticate(_ context.Context, c *Credential) AuthenticationResult {
+func (a BearerTestAuthenticator) Authenticate(ctx context.Context, c *Credential) AuthenticationResult {
 	d := DecisionRejected
 	if a.Decide != nil {
 		d = a.Decide(c.BearerToken)
@@ -359,24 +361,28 @@ func (a BearerTestAuthenticator) Authenticate(_ context.Context, c *Credential) 
 	if d != DecisionAuthenticated {
 		return AuthenticationResult{Decision: d}
 	}
-	b, err := a.binding()
+	b, err := a.binding(ctx)
 	if err != nil {
 		return AuthenticationResult{Decision: DecisionIndeterminate}
 	}
 	return AuthenticationResult{Decision: DecisionAuthenticated, Binding: b}
 }
 
-// binding builds the typed synthetic binding for this double's kind.
-func (a BearerTestAuthenticator) binding() (*Binding, error) {
+// binding builds the typed synthetic binding for this double's kind. For the
+// capability kinds it uses the matched "id" path parameter (when present in
+// the request context) so the M4.3 resource-binding enforcement sees a
+// matching resource; unit tests without a route context fall back to a fixed
+// synthetic id.
+func (a BearerTestAuthenticator) binding(ctx context.Context) (*Binding, error) {
 	switch a.KindValue {
 	case authpolicy.CredentialKindHumanOIDC:
 		return NewHumanOIDCBinding("test-issuer", "test-subject-human")
 	case authpolicy.CredentialKindAdminOIDC:
 		return NewAdminOIDCBinding("test-issuer", "test-subject-admin")
 	case authpolicy.CredentialKindRequestAccessToken:
-		return NewRequestAccessBinding("test-por-request-access")
+		return NewRequestAccessBinding(pathParamOr(ctx, "id", "test-por-request-access"))
 	case authpolicy.CredentialKindEnrollmentAccessToken:
-		return NewEnrollmentAccessBinding("test-enr-enrollment-access")
+		return NewEnrollmentAccessBinding(pathParamOr(ctx, "id", "test-enr-enrollment-access"))
 	case authpolicy.CredentialKindTemporaryPrincipalToken:
 		return NewTemporaryPrincipalBinding("test-tp-temporary-principal")
 	default:
@@ -425,6 +431,16 @@ func (s DeviceTestSource) DeviceCredential(r *http.Request) *DeviceCredential {
 		return nil
 	}
 	return s.Credential(r)
+}
+
+// pathParamOr returns a matched chi path parameter by name, or fallback when
+// there is no route context or no such parameter (unit tests use the
+// fallback).
+func pathParamOr(ctx context.Context, name, fallback string) string {
+	if v, ok := pathParam(chi.RouteContext(ctx), name); ok {
+		return v
+	}
+	return fallback
 }
 
 // allCredentialKinds is the closed set of the six contractual credential

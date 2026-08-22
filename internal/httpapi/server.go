@@ -133,10 +133,15 @@ func (s *Server) Handler(ssi openapi.StrictServerInterface) http.Handler {
 			// required runtime pipeline:
 			//
 			//   BaseAuthentication -> M3 contract enforcement
-			//     -> ConditionalAuthentication -> strict handler
+			//     -> ConditionalAuthentication (Phase B, publishes the
+			//        effective conditional requirement)
+			//       -> capability resource binding (M4.3, follows the
+			//          effective policy; SOL-M4.3-002)
+			//         -> strict handler
 			//
-			// This ordering is pinned by integration tests (authn_test.go);
-			// it is not assumed from documentation.
+			// This ordering is pinned by integration tests (authn_test.go and
+			// capability_test.go); it is not assumed from documentation.
+			openapi.MiddlewareFunc(s.authn.ResourceBinding()),
 			openapi.MiddlewareFunc(s.authn.ConditionalAuthentication()),
 			openapi.MiddlewareFunc(s.enforcer.OperationMiddleware()),
 			openapi.MiddlewareFunc(s.authn.BaseAuthentication()),

@@ -82,3 +82,68 @@ func AuthenticationContextFrom(ctx context.Context) (*AuthenticationContext, boo
 	ac, ok := ctx.Value(authenticationContextKey{}).(*AuthenticationContext)
 	return ac, ok
 }
+
+// ConditionalRequirement is the trusted, immutable, request-local result of
+// Phase B's effective conditional selection: the discriminator value the
+// request body carried and the exact CredentialKind it requires.
+//
+// Fields are unexported and there is no public setter: only Phase B (through
+// newConditionalRequirement) constructs one, and the resource-binding step
+// re-validates it against the compiled M4.1 policy rather than trusting it
+// merely because it is present in the context.
+type ConditionalRequirement struct {
+	discriminator      string
+	discriminatorValue string
+	requiredKind       authpolicy.CredentialKind
+}
+
+// newConditionalRequirement is the only construction path for a conditional
+// requirement; it is owned by Phase B.
+func newConditionalRequirement(discriminator, discriminatorValue string, requiredKind authpolicy.CredentialKind) *ConditionalRequirement {
+	return &ConditionalRequirement{
+		discriminator:      discriminator,
+		discriminatorValue: discriminatorValue,
+		requiredKind:       requiredKind,
+	}
+}
+
+// Discriminator returns the discriminator property name.
+func (cr *ConditionalRequirement) Discriminator() string {
+	if cr == nil {
+		return ""
+	}
+	return cr.discriminator
+}
+
+// DiscriminatorValue returns the resolved discriminator value.
+func (cr *ConditionalRequirement) DiscriminatorValue() string {
+	if cr == nil {
+		return ""
+	}
+	return cr.discriminatorValue
+}
+
+// RequiredKind returns the exact credential kind the effective case mandates.
+func (cr *ConditionalRequirement) RequiredKind() authpolicy.CredentialKind {
+	if cr == nil {
+		return ""
+	}
+	return cr.requiredKind
+}
+
+type conditionalRequirementKey struct{}
+
+// withConditionalRequirement stores the effective conditional requirement in
+// ctx. It is attached by Phase B after the discriminator has been resolved.
+// The helpers are package-private: unrelated code cannot inject an arbitrary
+// requirement into a request context.
+func withConditionalRequirement(ctx context.Context, cr *ConditionalRequirement) context.Context {
+	return context.WithValue(ctx, conditionalRequirementKey{}, cr)
+}
+
+// conditionalRequirementFrom returns the effective conditional requirement,
+// if Phase B resolved one.
+func conditionalRequirementFrom(ctx context.Context) (*ConditionalRequirement, bool) {
+	cr, ok := ctx.Value(conditionalRequirementKey{}).(*ConditionalRequirement)
+	return cr, ok
+}
