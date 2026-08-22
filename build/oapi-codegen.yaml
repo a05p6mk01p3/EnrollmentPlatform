@@ -3,6 +3,8 @@
 # Pin is enforced by the Makefile (generate target).
 package: openapi
 output: internal/generated/openapi/api.gen.go
+compatibility:
+  preserve-original-operation-id-casing-in-embedded-spec: true
 generate:
   models: true
   embedded-spec: true

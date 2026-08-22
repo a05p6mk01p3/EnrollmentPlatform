@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 
+	authpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/policy"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi/middleware"
@@ -27,6 +28,12 @@ import (
 type Server struct {
 	cfg      config.Config
 	enforcer *middleware.Enforcer
+
+	// authPolicy is the compiled, immutable authentication policy derived
+	// from the canonical spec. It is startup-compiled but not yet consumed by
+	// request handling: the authentication runtime is M4.2. It is kept
+	// read-only for that future milestone.
+	authPolicy *authpolicy.Policy
 }
 
 // NewServer parses the embedded OpenAPI spec and prepares the contract
@@ -39,11 +46,22 @@ func NewServer(cfg config.Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading embedded OpenAPI spec: %w", err)
 	}
+
+	// Startup-compile the authentication policy from the canonical spec. Any
+	// ambiguity or unsupported authentication metadata fails construction:
+	// the API must not start with a contract whose authentication policy it
+	// cannot compile safely. The compiled policy is stored read-only for the
+	// M4.2 authentication runtime and is not executed per request here.
+	compiledAuthPolicy, err := authpolicy.Compile(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("compiling authentication policy: %w", err)
+	}
+
 	enforcer, err := middleware.NewEnforcer(canonical, cfg.GeneralJSONDefaultBytes, cfg.AbsoluteRequestBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("preparing contract enforcement: %w", err)
 	}
-	return &Server{cfg: cfg, enforcer: enforcer}, nil
+	return &Server{cfg: cfg, enforcer: enforcer, authPolicy: compiledAuthPolicy}, nil
 }
 
 // Handler wires the complete HTTP pipeline for a strict server
