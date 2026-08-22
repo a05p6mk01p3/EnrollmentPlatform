@@ -6,6 +6,7 @@ require (
 	github.com/getkin/kin-openapi v0.147.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/oapi-codegen/runtime v1.7.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
 
 require (
@@ -16,6 +17,5 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/oasdiff/yaml v0.1.1 // indirect
 	github.com/oasdiff/yaml3 v0.0.14 // indirect
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	golang.org/x/text v0.32.0 // indirect
 )

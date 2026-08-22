@@ -1,8 +1,9 @@
 // Command enrollment-api is the Enrollment Platform API service.
 //
-// M1 scope: composition-root skeleton. It loads configuration and constructs the
-// HTTP adapter, but does not start a listener and does not register any endpoint
-// (handlers arrive in M2+). No business behavior is simulated here.
+// Current scope: composition-root skeleton. It loads configuration and prepares
+// the HTTP adapter (correlation + contract enforcement + generated router), but
+// does not start a listener and does not register business handlers (those
+// arrive in later milestones). No business behavior is simulated here.
 package main
 
 import (
@@ -26,10 +27,15 @@ func run() error {
 		return err
 	}
 
-	// Composition root: build the HTTP adapter. No listener is started and no
-	// handlers are registered in this milestone.
-	_ = httpapi.NewServer(cfg)
+	// Composition root: prepare the HTTP adapter (contract enforcement
+	// middleware + generated router). No listener is started and no business
+	// handler is registered in this milestone.
+	server, err := httpapi.NewServer(cfg)
+	if err != nil {
+		return err
+	}
+	_ = server
 
-	fmt.Fprintln(os.Stderr, "enrollment-api: M1 skeleton — no HTTP endpoints registered")
+	fmt.Fprintln(os.Stderr, "enrollment-api: skeleton — HTTP endpoints not yet registered")
 	return nil
 }
