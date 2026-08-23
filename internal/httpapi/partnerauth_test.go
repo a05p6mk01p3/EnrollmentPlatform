@@ -14,6 +14,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
 const testHumanSubject = "test-subject-human"
@@ -58,6 +59,7 @@ func newPartnerTestHandler(t *testing.T, svc *partnerauth.Service) (http.Handler
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -370,6 +372,7 @@ func TestPartnerAuthNilServiceRejected(t *testing.T) {
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(nil),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerauth.NewUnavailableService())),
 	); err == nil {
 		t.Fatal("NewServer with a nil partner authorization service must fail")
 	}
@@ -386,6 +389,7 @@ func TestPartnerAuthZeroValueServiceRejected(t *testing.T) {
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(&partnerauth.Service{}),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerauth.NewUnavailableService())),
 	); err == nil {
 		t.Fatal("NewServer with a zero-value partner authorization service must fail construction")
 	}
@@ -397,11 +401,13 @@ func TestPartnerAuthZeroValueServiceRejected(t *testing.T) {
 // request time rather than at startup.
 func TestPartnerAuthUnavailableServiceValidStartup(t *testing.T) {
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
+	partnerSvc := partnerauth.NewUnavailableService()
 	srv, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(testAuthnRegistry()),
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
-		httpapi.WithPartnerAuthService(partnerauth.NewUnavailableService()),
+		httpapi.WithPartnerAuthService(partnerSvc),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
 	)
 	if err != nil {
 		t.Fatalf("NewServer with the explicitly unavailable M5.2 service must succeed: %v", err)
@@ -424,6 +430,7 @@ func TestNewServerWithoutPartnerAuthServiceFails(t *testing.T) {
 		httpapi.WithAuthnRegistry(testAuthnRegistry()),
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerauth.NewUnavailableService())),
 	)
 	if err == nil {
 		t.Fatal("NewServer without WithPartnerAuthService must fail construction")
@@ -433,6 +440,7 @@ func TestNewServerWithoutPartnerAuthServiceFails(t *testing.T) {
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(nil),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerauth.NewUnavailableService())),
 	); err == nil {
 		t.Fatal("NewServer with a nil partner authorization service must fail construction")
 	}
@@ -459,6 +467,7 @@ func TestPartnerAuthMandatoryCompositionDeniesWithoutDelegation(t *testing.T) {
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -509,6 +518,7 @@ func TestPartnerAuthTrustBundleSkipsPartnerResolution(t *testing.T) {
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -626,6 +636,7 @@ func TestPartnerAuthConcurrentRequestIsolation(t *testing.T) {
 		httpapi.WithDeviceMTLSSource(src),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

@@ -13,6 +13,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
 // TestCompositionBuildWiresIntoServer proves the M4.6 composition root: the
@@ -55,11 +56,16 @@ func TestCompositionBuildWiresIntoServer(t *testing.T) {
 	}
 
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
-	srv, err := httpapi.NewServer(cfg, httpapi.WithAuthnRegistry(registry), httpapi.WithDeviceMTLSSource(device),
+	partnerSvc := partnerauth.NewUnavailableService()
+	srv, err := httpapi.NewServer(cfg,
+		httpapi.WithAuthnRegistry(registry),
+		httpapi.WithDeviceMTLSSource(device),
 		// This test exercises the bearer RequestAccessToken enrollment branch
-		// only; the mandatory M5.2 dependency is wired explicitly as the
-		// fail-closed unavailable provider.
-		httpapi.WithPartnerAuthService(partnerauth.NewUnavailableService()))
+		// only; the mandatory M5.2 and M5.3 dependencies are wired explicitly
+		// as the fail-closed unavailable providers.
+		httpapi.WithPartnerAuthService(partnerSvc),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
+	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

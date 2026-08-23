@@ -22,6 +22,7 @@ const (
 	TypeAuthenticationRequired = "https://pki.example/errors/authentication-required"
 	TypeScopeDenied            = "https://pki.example/errors/scope-denied"
 	TypePartnerNotAuthorized   = "https://pki.example/errors/partner-not-authorized"
+	TypeResourceNotFound       = "https://pki.example/errors/resource-not-found"
 	TypeDependencyUnavailable  = "https://pki.example/errors/dependency-unavailable"
 	// TypeInternalError is infrastructure-only (server bug); it is not a
 	// contract machine code and must not be relied upon by clients.

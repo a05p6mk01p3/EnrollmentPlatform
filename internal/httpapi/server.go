@@ -30,6 +30,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi/middleware"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi/problem"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
 // Server is the Enrollment API HTTP adapter and the boundary of the
@@ -61,13 +62,23 @@ type Server struct {
 	// exists. There is no implicit fallback and no permissive default.
 	partnerAuth *partnerauth.Service
 
+	// resourceOwnership is the M5.3 resource ownership and visibility boundary.
+	// It resolves minimal authoritative resource ownership metadata and
+	// evaluates Human visibility for pre-onboarding requests. It is a
+	// MANDATORY, explicitly supplied dependency: production currently wires
+	// the explicit fail-closed unavailable service while no real resource
+	// ownership provider exists. There is no implicit fallback and no
+	// permissive default.
+	resourceOwnership *resourceownership.Service
+
 	// Option inputs, resolved by NewServer.
-	authnRegistry         *authruntime.Registry
-	authnRegistryExplicit bool
-	deviceSource          authruntime.DeviceMTLSSource
-	authzRegistry         *authzruntime.Registry
-	authzRegistryExplicit bool
-	partnerAuthExplicit   bool
+	authnRegistry             *authruntime.Registry
+	authnRegistryExplicit     bool
+	deviceSource              authruntime.DeviceMTLSSource
+	authzRegistry             *authzruntime.Registry
+	authzRegistryExplicit     bool
+	partnerAuthExplicit       bool
+	resourceOwnershipExplicit bool
 }
 
 // Option customizes Server construction.
@@ -113,6 +124,17 @@ func WithPartnerAuthService(svc *partnerauth.Service) Option {
 	return func(s *Server) {
 		s.partnerAuth = svc
 		s.partnerAuthExplicit = true
+	}
+}
+
+// WithResourceOwnershipService wires the M5.3 resource ownership and
+// visibility service. It is a mandatory dependency: NewServer fails when it is
+// omitted (no implicit unavailable/permissive fallback), and a nil or
+// typed-nil service also fails construction.
+func WithResourceOwnershipService(svc *resourceownership.Service) Option {
+	return func(s *Server) {
+		s.resourceOwnership = svc
+		s.resourceOwnershipExplicit = true
 	}
 }
 
@@ -203,6 +225,24 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 		return nil, fmt.Errorf("validating partner authorization service: %w", err)
 	}
 
+	// M5.3 resource ownership & visibility: mandatory dependency, no implicit
+	// fallback. The service must be supplied explicitly (production wires the
+	// explicit fail-closed unavailable provider while no real provider
+	// exists); a missing or nil service fails construction before any request
+	// is served. The service's own structural integrity is revalidated here at
+	// the startup boundary: a zero-value &resourceownership.Service{} (non-nil
+	// but with unusable resolver state) is rejected instead of being deferred to
+	// a request-time DEPENDENCY_UNAVAILABLE.
+	if !s.resourceOwnershipExplicit {
+		return nil, fmt.Errorf("validating resource ownership service: no resource ownership service supplied; wire one explicitly with WithResourceOwnershipService")
+	}
+	if s.resourceOwnership == nil {
+		return nil, fmt.Errorf("validating resource ownership service: nil or typed-nil service")
+	}
+	if err := s.resourceOwnership.ValidateWithPartnerAuth(s.partnerAuth); err != nil {
+		return nil, fmt.Errorf("validating resource ownership service: %w", err)
+	}
+
 	enforcer, err := middleware.NewEnforcer(canonical, cfg.GeneralJSONDefaultBytes, cfg.AbsoluteRequestBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("preparing contract enforcement: %w", err)
@@ -215,14 +255,15 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 // implementation. The returned handler owns correlation, routing, authentication,
 // contract enforcement and domain authorization; the caller is responsible for the listener.
 //
-// The M5.2 partner authorization boundary is a MANDATORY part of this
-// composition: the supplied StrictServerInterface is always wrapped by the
-// partner/scope selection decorator before the generated strict handler, so
-// there is no handler-construction path that registers protected business
-// handlers while skipping M5.2. The wrapper is private (wrapPartnerAuth) and
-// cannot be bypassed through the public surface.
+// The M5.2 partner authorization and M5.3 resource ownership boundaries are
+// MANDATORY parts of this composition: the supplied StrictServerInterface is
+// always wrapped by the partner/scope selection decorator and the resource
+// visibility decorator before the generated strict handler, so there is no
+// handler-construction path that registers protected business handlers while
+// skipping M5.2 or M5.3. The wrappers are private (wrapPartnerAuth,
+// wrapResourceOwnership) and cannot be bypassed through the public surface.
 func (s *Server) Handler(ssi openapi.StrictServerInterface) http.Handler {
-	strictSI := openapi.NewStrictHandlerWithOptions(s.wrapPartnerAuth(ssi), nil, openapi.StrictHTTPServerOptions{
+	strictSI := openapi.NewStrictHandlerWithOptions(s.wrapResourceOwnership(s.wrapPartnerAuth(ssi)), nil, openapi.StrictHTTPServerOptions{
 		// Defense in depth: with enforcement upstream these should not fire,
 		// but if the generated decoder or a handler fails, answers stay
 		// RFC 9457-shaped.

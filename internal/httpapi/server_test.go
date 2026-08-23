@@ -17,6 +17,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
 // probeSSI implements openapi.StrictServerInterface without any business
@@ -61,7 +62,12 @@ func (p *probeSSI) CreatePreOnboardingRequest(ctx context.Context, request opena
 
 func (p *probeSSI) GetPreOnboardingRequest(ctx context.Context, request openapi.GetPreOnboardingRequestRequestObject) (openapi.GetPreOnboardingRequestResponseObject, error) {
 	p.record("GetPreOnboardingRequest")
-	return openapi.GetPreOnboardingRequest200JSONResponse{}, nil
+	return openapi.GetPreOnboardingRequest200JSONResponse{
+		Body: openapi.PreOnboardingRequest{
+			PreOnboardingRequestId: request.Id,
+			PartnerId:              "P1",
+		},
+	}, nil
 }
 
 func (p *probeSSI) CreateEnrollment(ctx context.Context, request openapi.CreateEnrollmentRequestObject) (openapi.CreateEnrollmentResponseObject, error) {
@@ -320,14 +326,41 @@ func testPartnerAuthService() *partnerauth.Service {
 	return svc
 }
 
+// testResourceOwnershipService returns the deterministic M5.3 harness service
+// used by pipeline tests that are not M5.3-focused. It is explicitly wired into
+// every NewServer composition (M5.3 is a mandatory dependency):
+//
+//   - pre-onboarding requests resolve to P1 (matching testPartnerAuthService's
+//     authorized partner for testHumanSubject);
+//   - the human authorizer is wired to the exact supplied partnerSvc.
+func testResourceOwnershipService(partnerSvc *partnerauth.Service) *resourceownership.Service {
+	if partnerSvc == nil {
+		partnerSvc = testPartnerAuthService()
+	}
+	svc, err := resourceownership.NewService(
+		resourceownership.StaticPreOnboardingOwnershipResolver{
+			Resolve: func(_ context.Context, id string) (resourceownership.OwnershipResult, error) {
+				return resourceownership.OwnershipFound(id, "P1"), nil
+			},
+		},
+		partnerSvc,
+	)
+	if err != nil {
+		panic(err)
+	}
+	return svc
+}
+
 func newTestHandler(t testing.TB) (http.Handler, *probeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
+	partnerSvc := testPartnerAuthService()
 	srv, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(testAuthnRegistry()),
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
-		httpapi.WithPartnerAuthService(testPartnerAuthService()),
+		httpapi.WithPartnerAuthService(partnerSvc),
+		httpapi.WithResourceOwnershipService(testResourceOwnershipService(partnerSvc)),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

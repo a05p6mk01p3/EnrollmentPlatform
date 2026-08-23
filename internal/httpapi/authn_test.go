@@ -16,6 +16,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
 // Token conventions for the deterministic fakes below.
@@ -136,11 +137,13 @@ func (p *authProbeSSI) CompleteEnrollment(ctx context.Context, request openapi.C
 func newAuthTestHandler(t *testing.T, reg *authruntime.Registry, source authruntime.DeviceMTLSSource) (http.Handler, *authProbeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
+	partnerSvc := testPartnerAuthService()
 	srv, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(completeTestRegistry(t, reg)),
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(source)),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
-		httpapi.WithPartnerAuthService(testPartnerAuthService()),
+		httpapi.WithPartnerAuthService(partnerSvc),
+		httpapi.WithResourceOwnershipService(testResourceOwnershipService(partnerSvc)),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -860,10 +863,12 @@ func TestProductionStartupRequiresCompleteAuthenticationComposition(t *testing.T
 	// partner authorization service is a mandatory dependency and is wired
 	// explicitly (here: the fail-closed unavailable provider; this test never
 	// touches M5.2-owned routes).
+	partnerSvc := partnerauth.NewUnavailableService()
 	if _, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(completeTestRegistry(t, nil)),
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
-		httpapi.WithPartnerAuthService(partnerauth.NewUnavailableService()),
+		httpapi.WithPartnerAuthService(partnerSvc),
+		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
 	); err != nil {
 		t.Fatalf("NewServer with a complete composition should succeed: %v", err)
 	}
