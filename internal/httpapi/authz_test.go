@@ -13,6 +13,7 @@ import (
 	authzruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authz/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
 )
 
 func newAuthzTestServer(t *testing.T, authzReg *authzruntime.Registry) (http.Handler, *probeSSI) {
@@ -22,6 +23,10 @@ func newAuthzTestServer(t *testing.T, authzReg *authzruntime.Registry) (http.Han
 		httpapi.WithAuthnRegistry(matrixRegistry(t)),
 		httpapi.WithDeviceMTLSSource(matrixDeviceSource()),
 		httpapi.WithAuthzRegistry(authzReg),
+		// These tests exercise M5.1 admin routes only; the mandatory M5.2
+		// dependency is wired explicitly as the fail-closed unavailable
+		// provider.
+		httpapi.WithPartnerAuthService(partnerauth.NewUnavailableService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

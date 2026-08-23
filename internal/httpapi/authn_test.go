@@ -15,6 +15,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
 )
 
 // Token conventions for the deterministic fakes below.
@@ -139,6 +140,7 @@ func newAuthTestHandler(t *testing.T, reg *authruntime.Registry, source authrunt
 		httpapi.WithAuthnRegistry(completeTestRegistry(t, reg)),
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(source)),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
+		httpapi.WithPartnerAuthService(testPartnerAuthService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -343,20 +345,26 @@ func TestTemporaryPrincipalRemainsSeparate(t *testing.T) {
 		acceptOnly(authpolicy.CredentialKindTemporaryPrincipalToken, tokTemp),
 	), nil)
 
-	// A TemporaryPrincipalToken credential authenticates on its own.
+	// A TemporaryPrincipalToken credential authenticates on its own (OR
+	// semantics): the request passes authentication and reaches the mandatory
+	// M5.2 boundary, which blocks it BEFORE the protected mutation because the
+	// later mandatory gates (concrete production token verifier/bootstrap and
+	// transactional max_submissions consumption) are unavailable. The boundary
+	// answers fail-closed and the mutation seam is never invoked. This asserts
+	// the synthetic-harness observable behavior (fail-closed), not a
+	// production success path.
 	rr := doAuth(t, h, "POST", "/v1/pre-onboarding-requests", preOnboardingBody, map[string]string{
 		"Content-Type":    "application/json",
 		"Idempotency-Key": validIdempotencyKey,
 		"Authorization":   "Bearer " + tokTemp,
 	})
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201 (body %s)", rr.Code, rr.Body.String())
-	}
-	if p.count("CreatePreOnboardingRequest") != 1 {
-		t.Fatal("handler was not called")
+	assertProblem(t, rr, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE")
+	if p.count("CreatePreOnboardingRequest") != 0 {
+		t.Fatal("TemporaryPrincipalToken must not reach the protected mutation")
 	}
 
-	// A HumanOIDC credential also authenticates (OR semantics).
+	// A HumanOIDC credential also authenticates (OR semantics) and passes the
+	// M5.2 gate: the harness authorizes test-subject-human for P1.
 	rr2 := doAuth(t, h, "POST", "/v1/pre-onboarding-requests", preOnboardingBody, map[string]string{
 		"Content-Type":    "application/json",
 		"Idempotency-Key": validIdempotencyKey,
@@ -364,6 +372,9 @@ func TestTemporaryPrincipalRemainsSeparate(t *testing.T) {
 	})
 	if rr2.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body %s)", rr2.Code, rr2.Body.String())
+	}
+	if p.count("CreatePreOnboardingRequest") != 1 {
+		t.Fatalf("CreatePreOnboardingRequest calls = %d, want 1", p.count("CreatePreOnboardingRequest"))
 	}
 }
 
@@ -845,10 +856,14 @@ func TestProductionStartupRequiresCompleteAuthenticationComposition(t *testing.T
 		t.Fatalf("NewServer error = %v; want MissingAuthenticatorError{HumanOIDC}", err)
 	}
 
-	// A complete registry plus a real source constructs successfully.
+	// A complete registry plus a real source constructs successfully. The M5.2
+	// partner authorization service is a mandatory dependency and is wired
+	// explicitly (here: the fail-closed unavailable provider; this test never
+	// touches M5.2-owned routes).
 	if _, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(completeTestRegistry(t, nil)),
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
+		httpapi.WithPartnerAuthService(partnerauth.NewUnavailableService()),
 	); err != nil {
 		t.Fatalf("NewServer with a complete composition should succeed: %v", err)
 	}
@@ -997,7 +1012,10 @@ func TestM3RegistryMultiBearerKindRoutesReachM3(t *testing.T) {
 	h, p := newTestHandler(t)
 
 	// HumanOIDC OR TemporaryPrincipalToken: a TemporaryPrincipalToken token
-	// authenticates exactly one kind and reaches M3 + the handler.
+	// authenticates exactly one kind without artificial ambiguity, passes M3
+	// (a malformed body would be 400, a wrong credential 401), and reaches the
+	// mandatory M5.2 boundary — which blocks it before the protected mutation
+	// because the later mandatory Temporary Principal gates are unavailable.
 	rr := doAuth(t, h, "POST", "/v1/pre-onboarding-requests",
 		`{"partner_id":"P1","claimed_device":{"hostname":"PC-001"},"agent":{"version":"1.0.0","platform":"windows"}}`,
 		map[string]string{
@@ -1005,11 +1023,9 @@ func TestM3RegistryMultiBearerKindRoutesReachM3(t *testing.T) {
 			"Idempotency-Key": validIdempotencyKey,
 			"Authorization":   "Bearer " + m3BearerToken(authpolicy.CredentialKindTemporaryPrincipalToken),
 		})
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201 (body %s)", rr.Code, rr.Body.String())
-	}
-	if p.count("CreatePreOnboardingRequest") != 1 {
-		t.Fatal("CreatePreOnboardingRequest was not reached")
+	assertProblem(t, rr, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE")
+	if p.count("CreatePreOnboardingRequest") != 0 {
+		t.Fatal("CreatePreOnboardingRequest must not be reached for a Temporary Principal")
 	}
 
 	// HumanOIDC OR RequestAccessToken: a HumanOIDC token authenticates

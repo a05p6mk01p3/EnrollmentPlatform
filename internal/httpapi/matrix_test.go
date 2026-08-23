@@ -337,11 +337,45 @@ func TestAuthenticationMatrixPositive(t *testing.T) {
 				t.Run(string(kind), func(t *testing.T) {
 					h, p := matrixHandler(t)
 					rr := matrixRequest(t, h, tc, kind)
-					if rr.Code != tc.status {
-						t.Fatalf("status = %d, want %d (body %s)", rr.Code, tc.status, rr.Body.String())
+
+					wantStatus, wantCalls := tc.status, 1
+					switch {
+					case tc.opID == "getMyAuthorizations":
+						// M5.2 owns this operation: it is answered directly by the
+						// partner authorization boundary and the inner handler is
+						// never invoked.
+						wantCalls = 0
+					case tc.opID == "createPreOnboardingRequest" && kind == authpolicy.CredentialKindTemporaryPrincipalToken:
+						// A synthetically authenticated Temporary Principal passes
+						// authentication but is blocked by the M5.2 boundary before
+						// the protected mutation: the later mandatory gates
+						// (concrete production token verifier/bootstrap and
+						// transactional max_submissions consumption) are
+						// unavailable, so the boundary answers fail-closed.
+						wantStatus, wantCalls = http.StatusServiceUnavailable, 0
 					}
-					if p.count(tc.handler) != 1 {
-						t.Fatalf("%s calls = %d, want 1", tc.handler, p.count(tc.handler))
+					if rr.Code != wantStatus {
+						t.Fatalf("status = %d, want %d (body %s)", rr.Code, wantStatus, rr.Body.String())
+					}
+					if p.count(tc.handler) != wantCalls {
+						t.Fatalf("%s calls = %d, want %d", tc.handler, p.count(tc.handler), wantCalls)
+					}
+					switch tc.opID {
+					case "getMyAuthorizations":
+						body := jsonBody(t, rr)
+						if _, ok := body["principal_id"]; !ok {
+							t.Fatalf("M5.2 response lacks principal_id: %v", body)
+						}
+						if _, ok := body["partners"]; !ok {
+							t.Fatalf("M5.2 response lacks partners: %v", body)
+						}
+					case "createPreOnboardingRequest":
+						if kind == authpolicy.CredentialKindTemporaryPrincipalToken {
+							m := problemBody(t, rr)
+							if m["error_code"] != "DEPENDENCY_UNAVAILABLE" {
+								t.Fatalf("error_code = %v, want DEPENDENCY_UNAVAILABLE", m["error_code"])
+							}
+						}
 					}
 				})
 			}
@@ -470,8 +504,11 @@ func TestMixedAuthenticationConcurrencyIsolation(t *testing.T) {
 
 	roles := []role{
 		{
+			// M5.2 owns GET /v1/me/authorizations: the HumanOIDC request
+			// succeeds through the partner authorization boundary without
+			// invoking the inner probe handler (wantCall is empty).
 			name: "HumanOIDC", method: "GET", path: "/v1/me/authorizations",
-			wantStatus: http.StatusOK, wantCall: "GetMyAuthorizations",
+			wantStatus: http.StatusOK, wantCall: "",
 			headers: map[string]string{"Authorization": "Bearer " + tokHuman},
 		},
 		{
@@ -545,24 +582,28 @@ func TestMixedAuthenticationConcurrencyIsolation(t *testing.T) {
 		t.Error(err)
 	}
 
-	// Failure role must never reach a handler; every other worker succeeds.
-	failCount := (workers + len(roles) - 1) / len(roles)
-	if p.total() != (workers-failCount)*rounds {
-		t.Fatalf("total handler calls = %d; want %d", p.total(), (workers-failCount)*rounds)
+	// Failure role must never reach a handler; the M5.2-owned HumanOIDC role
+	// succeeds through the M5.2 boundary without invoking the probe; every
+	// other success worker invokes exactly one handler per round.
+	expected := 0
+	for w := 0; w < workers; w++ {
+		if roles[w%len(roles)].wantCall != "" {
+			expected += rounds
+		}
+	}
+	if p.total() != expected {
+		t.Fatalf("total handler calls = %d; want %d", p.total(), expected)
 	}
 
 	// Every recorded context carries exactly its own request's kind and a
 	// resource binding derived from the real route (never the test fallback),
-	// with no cross-request contamination.
+	// with no cross-request contamination. The HumanOIDC role is answered by
+	// the M5.2 boundary and therefore records no probe context.
 	for _, ac := range p.contextSnapshot() {
 		if ac == nil {
 			t.Fatal("handler observed a nil authentication context")
 		}
 		switch ac.OperationID() {
-		case "getMyAuthorizations":
-			if !ac.Has(authpolicy.CredentialKindHumanOIDC) {
-				t.Fatalf("getMyAuthorizations context kinds = %v", ac.Kinds())
-			}
 		case "getEnrollment":
 			b, ok := ac.Binding(authpolicy.CredentialKindEnrollmentAccessToken)
 			if !ok {

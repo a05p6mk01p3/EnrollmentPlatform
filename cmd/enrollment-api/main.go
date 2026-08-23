@@ -12,6 +12,7 @@ import (
 
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
 )
 
 func main() {
@@ -30,7 +31,14 @@ func run() error {
 	// Composition root: prepare the HTTP adapter (contract enforcement
 	// middleware + generated router). No listener is started and no business
 	// handler is registered in this milestone.
-	server, err := httpapi.NewServer(cfg)
+	//
+	// M5.2 partner authorization is explicitly wired as an unavailable,
+	// fail-closed provider while no real partner authorization source exists:
+	// no request can resolve partner authorization and no protected mutation
+	// can proceed.
+	server, err := httpapi.NewServer(cfg,
+		httpapi.WithPartnerAuthService(partnerauth.NewUnavailableService()),
+	)
 	if err != nil {
 		return err
 	}

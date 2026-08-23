@@ -16,6 +16,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
 )
 
 // probeSSI implements openapi.StrictServerInterface without any business
@@ -290,6 +291,35 @@ func testAuthzRegistry() *authzruntime.Registry {
 	return r
 }
 
+// testPartnerAuthService returns the deterministic M5.2 harness service used
+// by pipeline tests that are not M5.2-focused. It is explicitly wired into
+// every NewServer composition (M5.2 is a mandatory dependency):
+//
+//   - the harness human subject (test-subject-human, the fixed HumanOIDC
+//     binding produced by BearerTestAuthenticator) is authorized for P1 with
+//     device:preonboard, so pre-onboarding probe tests still reach the
+//     protected mutation seam through the mandatory M5.2 boundary;
+//   - every other subject resolves to a valid EMPTY authorization set;
+//   - the Temporary Principal resolver remains unavailable (fail closed).
+func testPartnerAuthService() *partnerauth.Service {
+	svc, err := partnerauth.NewService(
+		partnerauth.StaticHumanResolver{Resolve: func(_ context.Context, p partnerauth.HumanPrincipal) (partnerauth.HumanAuthorizations, error) {
+			if p.Subject == testHumanSubject {
+				return partnerauth.HumanAuthorizations{
+					PrincipalID: "principal-harness",
+					Partners:    []partnerauth.PartnerAuthorization{{PartnerID: "P1", DisplayName: "Harness A", Scopes: []string{partnerauth.ScopeDevicePreOnboard}}},
+				}, nil
+			}
+			return partnerauth.HumanAuthorizations{PrincipalID: "principal-harness"}, nil
+		}},
+		partnerauth.UnavailableTemporaryPrincipalResolver{},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return svc
+}
+
 func newTestHandler(t testing.TB) (http.Handler, *probeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
@@ -297,6 +327,7 @@ func newTestHandler(t testing.TB) (http.Handler, *probeSSI) {
 		httpapi.WithAuthnRegistry(testAuthnRegistry()),
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
+		httpapi.WithPartnerAuthService(testPartnerAuthService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

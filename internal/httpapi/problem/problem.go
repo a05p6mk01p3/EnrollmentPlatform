@@ -21,6 +21,7 @@ const (
 	TypeUnsupportedMediaType   = "https://pki.example/errors/unsupported-media-type"
 	TypeAuthenticationRequired = "https://pki.example/errors/authentication-required"
 	TypeScopeDenied            = "https://pki.example/errors/scope-denied"
+	TypePartnerNotAuthorized   = "https://pki.example/errors/partner-not-authorized"
 	TypeDependencyUnavailable  = "https://pki.example/errors/dependency-unavailable"
 	// TypeInternalError is infrastructure-only (server bug); it is not a
 	// contract machine code and must not be relied upon by clients.
@@ -166,6 +167,18 @@ func WriteScopeDenied(w http.ResponseWriter, r *http.Request) {
 		Title:     "Access denied",
 		Status:    http.StatusForbidden,
 		ErrorCode: "SCOPE_DENIED",
+	})
+}
+
+// WritePartnerNotAuthorized emits 403 PARTNER_NOT_AUTHORIZED, the contracted
+// response when the requested partner is not present in the principal's
+// current effective partner authorization set.
+func WritePartnerNotAuthorized(w http.ResponseWriter, r *http.Request) {
+	Write(w, r, Problem{
+		Type:      TypePartnerNotAuthorized,
+		Title:     "Access denied",
+		Status:    http.StatusForbidden,
+		ErrorCode: "PARTNER_NOT_AUTHORIZED",
 	})
 }
 

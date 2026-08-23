@@ -92,6 +92,7 @@ func oidcHandler(t *testing.T, humanAuth, adminAuth authruntime.Authenticator) (
 		httpapi.WithAuthnRegistry(oidcRegistry(t, humanAuth, adminAuth)),
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
+		httpapi.WithPartnerAuthService(testPartnerAuthService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -142,8 +143,18 @@ func TestOIDCHTTPCredentialDispatch(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
 		}
-		if p.count("GetMyAuthorizations") != 1 {
-			t.Fatal("GetMyAuthorizations was not reached")
+		// The route is answered by the mandatory M5.2 boundary (the inner
+		// handler is never invoked); the OIDC subject resolves to a valid
+		// empty authorization set in this harness.
+		body := jsonBody(t, rr)
+		if _, ok := body["principal_id"]; !ok {
+			t.Fatalf("M5.2 response lacks principal_id: %v", body)
+		}
+		if _, ok := body["partners"]; !ok {
+			t.Fatalf("M5.2 response lacks partners: %v", body)
+		}
+		if p.count("GetMyAuthorizations") != 0 {
+			t.Fatal("GetMyAuthorizations must be answered by the M5.2 boundary, not the inner handler")
 		}
 	})
 
