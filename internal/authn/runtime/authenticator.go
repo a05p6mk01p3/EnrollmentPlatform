@@ -53,11 +53,17 @@ const (
 	DecisionIndeterminate
 )
 
-// DeviceCredential is an opaque candidate device-mTLS credential signal
-// produced by a future trusted-proxy source (M4.5). M4.2 never inspects its
-// contents; it only carries it from the source port to the DeviceMTLS
-// authenticator port.
-type DeviceCredential struct{}
+// DeviceCredential is the candidate device-mTLS credential signal produced
+// by the trusted-proxy source (M4.5). It carries ONLY the server-resolved
+// identifiers produced by that source; it never carries raw certificate,
+// fingerprint, serial, TLS or proxy-header material. M4.2 carries it from the
+// source port to the DeviceMTLS authenticator port without inspecting the
+// contents beyond their non-emptiness at the authenticator.
+type DeviceCredential struct {
+	DeviceID              string
+	CertificateID         string
+	IssuedForEnrollmentID string
+}
 
 // Credential is the physical credential signal presented for one request,
 // delivered to exactly one scheme-specific authenticator. Exactly one carrier
@@ -150,11 +156,14 @@ type TemporaryPrincipalBinding struct {
 }
 
 // DeviceMTLSBinding is the authenticated binding for DeviceMTLS: the
-// server-resolved device identity and certificate identity. It carries no raw
-// certificate/header/TLS material; how these IDs are resolved remains M4.5.
+// server-resolved device identity, certificate identity and the enrollment
+// that certificate was issued for. It carries no raw certificate/header/TLS
+// material; all three IDs are resolved server-side by the M4.5 trusted-proxy
+// source.
 type DeviceMTLSBinding struct {
-	DeviceID      string
-	CertificateID string
+	DeviceID              string
+	CertificateID         string
+	IssuedForEnrollmentID string
 }
 
 // NewHumanOIDCBinding constructs a HumanOIDC binding. issuer and subject are
@@ -203,13 +212,13 @@ func NewTemporaryPrincipalBinding(temporaryPrincipalID string) (*Binding, error)
 	return &Binding{kind: authpolicy.CredentialKindTemporaryPrincipalToken, temporary: TemporaryPrincipalBinding{TemporaryPrincipalID: temporaryPrincipalID}}, nil
 }
 
-// NewDeviceMTLSBinding constructs a DeviceMTLS binding. deviceID and
-// certificateID are both mandatory.
-func NewDeviceMTLSBinding(deviceID, certificateID string) (*Binding, error) {
-	if deviceID == "" || certificateID == "" {
-		return nil, errEmptyBindingField("DeviceMTLS", "device_id/certificate_id")
+// NewDeviceMTLSBinding constructs a DeviceMTLS binding. deviceID,
+// certificateID and issuedForEnrollmentID are all mandatory.
+func NewDeviceMTLSBinding(deviceID, certificateID, issuedForEnrollmentID string) (*Binding, error) {
+	if deviceID == "" || certificateID == "" || issuedForEnrollmentID == "" {
+		return nil, errEmptyBindingField("DeviceMTLS", "device_id/certificate_id/issued_for_enrollment_id")
 	}
-	return &Binding{kind: authpolicy.CredentialKindDeviceMTLS, deviceMTLS: DeviceMTLSBinding{DeviceID: deviceID, CertificateID: certificateID}}, nil
+	return &Binding{kind: authpolicy.CredentialKindDeviceMTLS, deviceMTLS: DeviceMTLSBinding{DeviceID: deviceID, CertificateID: certificateID, IssuedForEnrollmentID: issuedForEnrollmentID}}, nil
 }
 
 func errEmptyBindingField(kind, field string) error {
@@ -272,13 +281,19 @@ func (b *Binding) DeviceMTLS() (DeviceMTLSBinding, bool) {
 // DeviceMTLSSource obtains the candidate device-mTLS credential signal for a
 // request. It is the ONLY way the runtime receives DeviceMTLS candidates.
 //
-// The trusted Reverse Proxy boundary (M4.5) will provide the concrete
+// The trusted Reverse Proxy boundary (M4.5) provides the concrete
 // implementation. A nil source means no candidate is ever available and the
 // DeviceMTLS kind can never authenticate (fail closed).
 type DeviceMTLSSource interface {
 	// DeviceCredential returns the candidate device credential signal for
-	// the request, or nil when none is available.
-	DeviceCredential(r *http.Request) *DeviceCredential
+	// the request.
+	//
+	//   - (nil, nil) means the request presented no valid DeviceMTLS
+	//     credential (the runtime classifies this as Rejected).
+	//   - (credential, nil) carries the server-resolved device identity.
+	//   - (_, non-nil error) means a trusted dependency could not be
+	//     evaluated (the runtime classifies this as Indeterminate).
+	DeviceCredential(r *http.Request) (*DeviceCredential, error)
 }
 
 // Registry maps each CredentialKind to exactly one Authenticator. It is
@@ -404,7 +419,7 @@ func (a DeviceTestAuthenticator) Kind() authpolicy.CredentialKind {
 
 // Authenticate evaluates the device credential. On success it builds a typed
 // DeviceMTLS binding with synthetic IDs.
-func (a DeviceTestAuthenticator) Authenticate(_ context.Context, c *Credential) AuthenticationResult {
+func (a DeviceTestAuthenticator) Authenticate(ctx context.Context, c *Credential) AuthenticationResult {
 	d := DecisionRejected
 	if a.Decide != nil {
 		d = a.Decide(c.Device)
@@ -412,7 +427,7 @@ func (a DeviceTestAuthenticator) Authenticate(_ context.Context, c *Credential) 
 	if d != DecisionAuthenticated {
 		return AuthenticationResult{Decision: d}
 	}
-	b, err := NewDeviceMTLSBinding("test-device-id", "test-certificate-id")
+	b, err := NewDeviceMTLSBinding("test-device-id", "test-certificate-id", pathParamOr(ctx, "id", "test-enrollment-id"))
 	if err != nil {
 		return AuthenticationResult{Decision: DecisionIndeterminate}
 	}
@@ -422,13 +437,13 @@ func (a DeviceTestAuthenticator) Authenticate(_ context.Context, c *Credential) 
 // DeviceTestSource is a deterministic test double for DeviceMTLSSource. Its
 // Credential function produces the candidate device credential per request.
 type DeviceTestSource struct {
-	Credential func(r *http.Request) *DeviceCredential
+	Credential func(r *http.Request) (*DeviceCredential, error)
 }
 
 // DeviceCredential returns the candidate device credential for the request.
-func (s DeviceTestSource) DeviceCredential(r *http.Request) *DeviceCredential {
+func (s DeviceTestSource) DeviceCredential(r *http.Request) (*DeviceCredential, error) {
 	if s.Credential == nil {
-		return nil
+		return nil, nil
 	}
 	return s.Credential(r)
 }

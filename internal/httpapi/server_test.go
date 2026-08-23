@@ -199,8 +199,8 @@ func testAuthnRegistry() *authruntime.Registry {
 
 // testDeviceSource always provides a device credential (deterministic double).
 func testDeviceSource() authruntime.DeviceMTLSSource {
-	return authruntime.DeviceTestSource{Credential: func(r *http.Request) *authruntime.DeviceCredential {
-		return &authruntime.DeviceCredential{}
+	return authruntime.DeviceTestSource{Credential: func(r *http.Request) (*authruntime.DeviceCredential, error) {
+		return &authruntime.DeviceCredential{}, nil
 	}}
 }
 

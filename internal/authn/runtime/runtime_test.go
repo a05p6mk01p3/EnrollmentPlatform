@@ -87,7 +87,7 @@ func rejectDevice() Authenticator {
 }
 
 func presentDevice() DeviceMTLSSource {
-	return DeviceTestSource{Credential: func(r *http.Request) *DeviceCredential { return &DeviceCredential{} }}
+	return DeviceTestSource{Credential: func(r *http.Request) (*DeviceCredential, error) { return &DeviceCredential{}, nil }}
 }
 
 func newRT(t *testing.T, spec *openapi3.T, policy *authpolicy.Policy, registry *Registry, source DeviceMTLSSource) *Runtime {
@@ -618,7 +618,7 @@ func TestContextExposesPerKindBinding(t *testing.T) {
 	}
 	device, ok := ac.Binding(authpolicy.CredentialKindDeviceMTLS)
 	dm, isDM := device.DeviceMTLS()
-	if !ok || !isDM || dm.DeviceID != "test-device-id" || dm.CertificateID != "test-certificate-id" {
+	if !ok || !isDM || dm.DeviceID != "test-device-id" || dm.CertificateID != "test-certificate-id" || dm.IssuedForEnrollmentID != "test-enrollment-id" {
 		t.Fatalf("DeviceMTLS binding = %+v (ok=%v, isDM=%v)", dm, ok, isDM)
 	}
 	if _, wrong := device.OIDCIdentity(); wrong {

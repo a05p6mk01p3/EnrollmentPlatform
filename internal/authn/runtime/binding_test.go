@@ -73,12 +73,12 @@ func TestBindingVariantsMatchCredentialKinds(t *testing.T) {
 		t.Fatal("TemporaryPrincipal binding must not expose OIDCIdentity")
 	}
 
-	dev := mustBinding(NewDeviceMTLSBinding("dev-123", "cert-456"))
+	dev := mustBinding(NewDeviceMTLSBinding("dev-123", "cert-456", "enr-789"))
 	if dev.Kind() != authpolicy.CredentialKindDeviceMTLS {
 		t.Fatalf("kind = %q", dev.Kind())
 	}
 	d, ok := dev.DeviceMTLS()
-	if !ok || d.DeviceID != "dev-123" || d.CertificateID != "cert-456" {
+	if !ok || d.DeviceID != "dev-123" || d.CertificateID != "cert-456" || d.IssuedForEnrollmentID != "enr-789" {
 		t.Fatalf("device-mTLS = %+v (ok=%v)", d, ok)
 	}
 	if _, ok := dev.TemporaryPrincipal(); ok {
@@ -100,8 +100,9 @@ func TestBindingEmptyMandatoryFieldsFailConstruction(t *testing.T) {
 		{"RequestAccess empty request ID", func() (*Binding, error) { return NewRequestAccessBinding("") }},
 		{"EnrollmentAccess empty enrollment ID", func() (*Binding, error) { return NewEnrollmentAccessBinding("") }},
 		{"TemporaryPrincipal empty ID", func() (*Binding, error) { return NewTemporaryPrincipalBinding("") }},
-		{"DeviceMTLS empty device ID", func() (*Binding, error) { return NewDeviceMTLSBinding("", "cert") }},
-		{"DeviceMTLS empty certificate ID", func() (*Binding, error) { return NewDeviceMTLSBinding("dev", "") }},
+		{"DeviceMTLS empty device ID", func() (*Binding, error) { return NewDeviceMTLSBinding("", "cert", "enr") }},
+		{"DeviceMTLS empty certificate ID", func() (*Binding, error) { return NewDeviceMTLSBinding("dev", "", "enr") }},
+		{"DeviceMTLS empty issued-for-enrollment ID", func() (*Binding, error) { return NewDeviceMTLSBinding("dev", "cert", "") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,7 +120,7 @@ func TestBindingEmptyMandatoryFieldsFailConstruction(t *testing.T) {
 func TestValidateBindingVariantIncompatibleWithKind(t *testing.T) {
 	humanWithDevice := &Binding{
 		kind:       authpolicy.CredentialKindHumanOIDC,
-		deviceMTLS: DeviceMTLSBinding{DeviceID: "d", CertificateID: "c"},
+		deviceMTLS: DeviceMTLSBinding{DeviceID: "d", CertificateID: "c", IssuedForEnrollmentID: "e"},
 	}
 	if err := validateBinding(authpolicy.CredentialKindHumanOIDC, humanWithDevice); err == nil {
 		t.Fatal("HumanOIDC kind with DeviceMTLS variant was accepted")
@@ -144,7 +145,7 @@ func TestValidateBindingVariantIncompatibleWithKind(t *testing.T) {
 // authenticator returning a DeviceMTLS binding, and a RequestAccessToken
 // authenticator returning an EnrollmentAccess binding.
 func TestBindingWrongKindPairingFailsClosedAtRuntime(t *testing.T) {
-	dev, err := NewDeviceMTLSBinding("dev-1", "cert-1")
+	dev, err := NewDeviceMTLSBinding("dev-1", "cert-1", "enr-1")
 	if err != nil {
 		t.Fatal(err)
 	}

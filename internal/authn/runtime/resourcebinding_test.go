@@ -127,6 +127,16 @@ func newBindingAC(op *authpolicy.OperationPolicy, bindings ...*Binding) *Authent
 	return ac
 }
 
+// enrollmentResource builds a matched Enrollment route resource.
+func enrollmentResource(v string) MatchedResource {
+	return MatchedResource{Kind: ResourceKindEnrollment, Value: v, Present: true}
+}
+
+// porResource builds a matched PreOnboardingRequest route resource.
+func porResource(v string) MatchedResource {
+	return MatchedResource{Kind: ResourceKindPreOnboardingRequest, Value: v, Present: true}
+}
+
 // --- SOL-M4.3-002 final: the compiled policy is the authority ---
 
 func TestResourceBindingConditionalRequiresTrustedRequirement(t *testing.T) {
@@ -135,12 +145,12 @@ func TestResourceBindingConditionalRequiresTrustedRequirement(t *testing.T) {
 		t.Fatal("synthetic spec must be conditional")
 	}
 
-	dev := mustBinding(NewDeviceMTLSBinding("dev-1", "cert-1"))
+	dev := mustBinding(NewDeviceMTLSBinding("dev-1", "cert-1", "enr-A"))
 	enr := mustBinding(NewEnrollmentAccessBinding("enr-B"))
 	ac := newBindingAC(op, dev, enr)
 
 	t.Run("missing requirement fails closed", func(t *testing.T) {
-		got := evaluateResourceBinding(op, ac, nil, false, "enr-A", true)
+		got := evaluateResourceBinding(op, ac, nil, false, enrollmentResource("enr-A"))
 		if got != resourceBindingIntegrity {
 			t.Fatalf("decision = %v, want integrity (no base-OR fallback)", got)
 		}
@@ -148,21 +158,21 @@ func TestResourceBindingConditionalRequiresTrustedRequirement(t *testing.T) {
 
 	t.Run("wrong discriminator fails closed", func(t *testing.T) {
 		cr := newConditionalRequirement("other_discriminator", "INSTALLED", authpolicy.CredentialKindDeviceMTLS)
-		if got := evaluateResourceBinding(op, ac, cr, true, "enr-A", true); got != resourceBindingIntegrity {
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-A")); got != resourceBindingIntegrity {
 			t.Fatalf("decision = %v, want integrity", got)
 		}
 	})
 
 	t.Run("unknown discriminator value fails closed", func(t *testing.T) {
 		cr := newConditionalRequirement("installation_status", "NOT_A_CASE", authpolicy.CredentialKindDeviceMTLS)
-		if got := evaluateResourceBinding(op, ac, cr, true, "enr-A", true); got != resourceBindingIntegrity {
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-A")); got != resourceBindingIntegrity {
 			t.Fatalf("decision = %v, want integrity", got)
 		}
 	})
 
 	t.Run("required kind inconsistent with compiled case fails closed", func(t *testing.T) {
 		cr := newConditionalRequirement("installation_status", "INSTALLED", authpolicy.CredentialKindEnrollmentAccessToken)
-		if got := evaluateResourceBinding(op, ac, cr, true, "enr-A", true); got != resourceBindingIntegrity {
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-A")); got != resourceBindingIntegrity {
 			t.Fatalf("decision = %v, want integrity", got)
 		}
 	})
@@ -171,29 +181,58 @@ func TestResourceBindingConditionalRequiresTrustedRequirement(t *testing.T) {
 		other := *ac
 		other.operationID = "someOtherOperation"
 		cr := newConditionalRequirement("installation_status", "INSTALLED", authpolicy.CredentialKindDeviceMTLS)
-		if got := evaluateResourceBinding(op, &other, cr, true, "enr-A", true); got != resourceBindingIntegrity {
+		if got := evaluateResourceBinding(op, &other, cr, true, enrollmentResource("enr-A")); got != resourceBindingIntegrity {
 			t.Fatalf("decision = %v, want integrity", got)
 		}
 	})
 
 	t.Run("INSTALLED ignores mismatched extra capability", func(t *testing.T) {
 		cr := newConditionalRequirement("installation_status", "INSTALLED", authpolicy.CredentialKindDeviceMTLS)
-		if got := evaluateResourceBinding(op, ac, cr, true, "enr-A", true); got != resourceBindingPass {
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-A")); got != resourceBindingPass {
 			t.Fatalf("decision = %v, want pass", got)
 		}
 	})
 
 	t.Run("FAILED mismatched required capability is unauthorized", func(t *testing.T) {
 		cr := newConditionalRequirement("installation_status", "FAILED", authpolicy.CredentialKindEnrollmentAccessToken)
-		if got := evaluateResourceBinding(op, ac, cr, true, "enr-A", true); got != resourceBindingUnauthorized {
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-A")); got != resourceBindingUnauthorized {
 			t.Fatalf("decision = %v, want unauthorized", got)
 		}
 	})
 
 	t.Run("FAILED matching required capability passes", func(t *testing.T) {
 		cr := newConditionalRequirement("installation_status", "FAILED", authpolicy.CredentialKindEnrollmentAccessToken)
-		if got := evaluateResourceBinding(op, ac, cr, true, "enr-B", true); got != resourceBindingPass {
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-B")); got != resourceBindingPass {
 			t.Fatalf("decision = %v, want pass", got)
+		}
+	})
+}
+
+// TestResourceBindingDeviceMTLSExactEnrollment proves the M4.5 activation
+// requirement: an INSTALLED completeEnrollment requires the exact
+// server-resolved certificate issued for that enrollment; device-id equality
+// alone is insufficient.
+func TestResourceBindingDeviceMTLSExactEnrollment(t *testing.T) {
+	_, _, op := compileSynthetic(t, conditionalCompleteSpecYAML)
+	if op.Conditional() == nil {
+		t.Fatal("synthetic spec must be conditional")
+	}
+
+	t.Run("exact issued-for enrollment passes", func(t *testing.T) {
+		dev := mustBinding(NewDeviceMTLSBinding("dev-D", "cert-A", "enr-A"))
+		ac := newBindingAC(op, dev)
+		cr := newConditionalRequirement("installation_status", "INSTALLED", authpolicy.CredentialKindDeviceMTLS)
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-A")); got != resourceBindingPass {
+			t.Fatalf("decision = %v, want pass", got)
+		}
+	})
+
+	t.Run("another certificate for the same device is rejected", func(t *testing.T) {
+		dev := mustBinding(NewDeviceMTLSBinding("dev-D", "cert-B", "enr-B"))
+		ac := newBindingAC(op, dev)
+		cr := newConditionalRequirement("installation_status", "INSTALLED", authpolicy.CredentialKindDeviceMTLS)
+		if got := evaluateResourceBinding(op, ac, cr, true, enrollmentResource("enr-A")); got != resourceBindingUnauthorized {
+			t.Fatalf("decision = %v, want unauthorized (device-id equality alone is insufficient)", got)
 		}
 	})
 }
@@ -209,16 +248,16 @@ func TestResourceBindingNonConditionalORAndAND(t *testing.T) {
 
 		// Both alternatives satisfied; the capability one is mismatched for
 		// por-A. The non-capability alternative must still satisfy the policy.
-		if got := evaluateResourceBinding(op, ac, nil, false, "por-A", true); got != resourceBindingPass {
+		if got := evaluateResourceBinding(op, ac, nil, false, porResource("por-A")); got != resourceBindingPass {
 			t.Fatalf("decision = %v, want pass (A must remain valid)", got)
 		}
 
 		// Only the mismatched capability alternative satisfied.
 		acOnly := newBindingAC(op, req)
-		if got := evaluateResourceBinding(op, acOnly, nil, false, "por-A", true); got != resourceBindingUnauthorized {
+		if got := evaluateResourceBinding(op, acOnly, nil, false, porResource("por-A")); got != resourceBindingUnauthorized {
 			t.Fatalf("decision = %v, want unauthorized", got)
 		}
-		if got := evaluateResourceBinding(op, acOnly, nil, false, "por-B", true); got != resourceBindingPass {
+		if got := evaluateResourceBinding(op, acOnly, nil, false, porResource("por-B")); got != resourceBindingPass {
 			t.Fatalf("decision = %v, want pass on matching resource", got)
 		}
 	})
@@ -229,18 +268,18 @@ func TestResourceBindingNonConditionalORAndAND(t *testing.T) {
 		mismatched := mustBinding(NewRequestAccessBinding("por-B"))
 		ac := newBindingAC(op, human, mismatched)
 
-		if got := evaluateResourceBinding(op, ac, nil, false, "por-A", true); got != resourceBindingUnauthorized {
+		if got := evaluateResourceBinding(op, ac, nil, false, porResource("por-A")); got != resourceBindingUnauthorized {
 			t.Fatalf("decision = %v, want unauthorized", got)
 		}
 
 		matched := mustBinding(NewRequestAccessBinding("por-A"))
 		acMatch := newBindingAC(op, human, matched)
-		if got := evaluateResourceBinding(op, acMatch, nil, false, "por-A", true); got != resourceBindingPass {
+		if got := evaluateResourceBinding(op, acMatch, nil, false, porResource("por-A")); got != resourceBindingPass {
 			t.Fatalf("decision = %v, want pass", got)
 		}
 
 		// No path resource id: no constraint from the capability member.
-		if got := evaluateResourceBinding(op, ac, nil, false, "", false); got != resourceBindingPass {
+		if got := evaluateResourceBinding(op, ac, nil, false, MatchedResource{}); got != resourceBindingPass {
 			t.Fatalf("decision = %v, want pass without path id", got)
 		}
 	})
@@ -250,8 +289,246 @@ func TestResourceBindingNonConditionalORAndAND(t *testing.T) {
 		human := mustBinding(NewHumanOIDCBinding("iss", "sub"))
 		ac := newBindingAC(op, human)
 		cr := newConditionalRequirement("operation", "INITIAL", authpolicy.CredentialKindRequestAccessToken)
-		if got := evaluateResourceBinding(op, ac, cr, true, "por-A", true); got != resourceBindingIntegrity {
+		if got := evaluateResourceBinding(op, ac, cr, true, porResource("por-A")); got != resourceBindingIntegrity {
 			t.Fatalf("decision = %v, want integrity", got)
+		}
+	})
+}
+
+// multiCapSpecYAML: non-conditional OR across every capability-bearing kind
+// plus a non-capability kind, so per-kind resource constraints can be
+// exercised through the per-satisfied-alternative path.
+const multiCapSpecYAML = `openapi: 3.1.0
+info: {title: synthetic, version: '1'}
+paths:
+  /x:
+    get:
+      operationId: multiCapOp
+      responses:
+        '200': {description: ok}
+      security:
+        - HumanOIDC: []
+        - RequestAccessToken: []
+        - EnrollmentAccessToken: []
+        - DeviceMTLS: []
+components:
+  securitySchemes:
+    HumanOIDC: {type: http, scheme: bearer, bearerFormat: JWT}
+    RequestAccessToken: {type: http, scheme: bearer, bearerFormat: opaque}
+    EnrollmentAccessToken: {type: http, scheme: bearer, bearerFormat: opaque}
+    DeviceMTLS: {type: mutualTLS}
+`
+
+// TestResourceBindingResourceKindConstrainsCapabilities proves
+// SOL-M4.5-003: each capability/device binding is constrained ONLY against
+// the typed route-resource kind it belongs to. The path parameter name "id"
+// by itself never determines the domain resource type.
+func TestResourceBindingResourceKindConstrainsCapabilities(t *testing.T) {
+	t.Run("RequestAccess binds only against PreOnboardingRequest", func(t *testing.T) {
+		_, _, op := compileSynthetic(t, multiCapSpecYAML)
+		ac := newBindingAC(op, mustBinding(NewRequestAccessBinding("por-A")))
+
+		// Matching value on the RIGHT resource kind passes.
+		if got := evaluateResourceBinding(op, ac, nil, false, porResource("por-A")); got != resourceBindingPass {
+			t.Fatalf("decision = %v, want pass", got)
+		}
+		// The SAME {id} value on an Enrollment resource must NOT bind a
+		// RequestAccess credential: {id} alone carries no domain semantics.
+		if got := evaluateResourceBinding(op, ac, nil, false, enrollmentResource("por-A")); got != resourceBindingUnauthorized {
+			t.Fatalf("decision = %v, want unauthorized (wrong resource kind)", got)
+		}
+	})
+
+	t.Run("EnrollmentAccess binds only against Enrollment", func(t *testing.T) {
+		_, _, op := compileSynthetic(t, multiCapSpecYAML)
+		ac := newBindingAC(op, mustBinding(NewEnrollmentAccessBinding("enr-A")))
+
+		if got := evaluateResourceBinding(op, ac, nil, false, enrollmentResource("enr-A")); got != resourceBindingPass {
+			t.Fatalf("decision = %v, want pass", got)
+		}
+		if got := evaluateResourceBinding(op, ac, nil, false, porResource("enr-A")); got != resourceBindingUnauthorized {
+			t.Fatalf("decision = %v, want unauthorized (wrong resource kind)", got)
+		}
+	})
+
+	t.Run("DeviceMTLS binds only against Enrollment", func(t *testing.T) {
+		_, _, op := compileSynthetic(t, multiCapSpecYAML)
+		ac := newBindingAC(op, mustBinding(NewDeviceMTLSBinding("dev-D", "cert-A", "enr-A")))
+
+		// Exact certificate for the enrollment route passes.
+		if got := evaluateResourceBinding(op, ac, nil, false, enrollmentResource("enr-A")); got != resourceBindingPass {
+			t.Fatalf("decision = %v, want pass", got)
+		}
+		// The SAME {id} value on a PreOnboardingRequest resource must NOT
+		// confer enrollment semantics: the DeviceMTLS binding cannot satisfy
+		// a non-enrollment {id}.
+		if got := evaluateResourceBinding(op, ac, nil, false, porResource("enr-A")); got != resourceBindingUnauthorized {
+			t.Fatalf("decision = %v, want unauthorized (plain {id} does not mean enrollment)", got)
+		}
+	})
+
+	t.Run("non-capability kinds carry no resource constraint", func(t *testing.T) {
+		_, _, op := compileSynthetic(t, multiCapSpecYAML)
+		ac := newBindingAC(op, mustBinding(NewHumanOIDCBinding("iss", "sub")))
+		if got := evaluateResourceBinding(op, ac, nil, false, enrollmentResource("enr-anything")); got != resourceBindingPass {
+			t.Fatalf("decision = %v, want pass", got)
+		}
+	})
+}
+
+// TestClassifyRouteResource proves the startup classification: the resource
+// kind comes from the canonical path-parameter COMPONENT identity, never from
+// the parameter name "id".
+func TestClassifyRouteResource(t *testing.T) {
+	t.Run("enrollment component classified as Enrollment regardless of param name", func(t *testing.T) {
+		spec := loadYAMLSpec(t, `openapi: 3.1.0
+info: {title: synthetic, version: '1'}
+paths:
+  /v1/enrollments/{id}/complete:
+    post:
+      operationId: completeEnrollment
+      parameters:
+        - $ref: '#/components/parameters/EnrollmentId'
+      responses:
+        '200': {description: ok}
+components:
+  parameters:
+    EnrollmentId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+`)
+		pi := spec.Paths.Map()["/v1/enrollments/{id}/complete"]
+		kind, err := classifyRouteResource(pi, pi.Post, "/v1/enrollments/{id}/complete")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind != ResourceKindEnrollment {
+			t.Fatalf("kind = %v, want enrollment", kind)
+		}
+	})
+
+	t.Run("pre-onboarding component classified independently", func(t *testing.T) {
+		spec := loadYAMLSpec(t, `openapi: 3.1.0
+info: {title: synthetic, version: '1'}
+paths:
+  /v1/pre-onboarding-requests/{id}:
+    get:
+      operationId: getPreOnboardingRequest
+      parameters:
+        - $ref: '#/components/parameters/PreOnboardingRequestId'
+      responses:
+        '200': {description: ok}
+components:
+  parameters:
+    PreOnboardingRequestId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+`)
+		pi := spec.Paths.Map()["/v1/pre-onboarding-requests/{id}"]
+		kind, err := classifyRouteResource(pi, pi.Get, "/v1/pre-onboarding-requests/{id}")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind != ResourceKindPreOnboardingRequest {
+			t.Fatalf("kind = %v, want pre-onboarding-request", kind)
+		}
+	})
+
+	t.Run("route without path parameter is unclassified", func(t *testing.T) {
+		_, _, _ = compileSynthetic(t, orReqSpecYAML)
+		spec := loadYAMLSpec(t, orReqSpecYAML)
+		pi := spec.Paths.Map()["/x"]
+		kind, err := classifyRouteResource(pi, pi.Get, "/x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind != ResourceKindUnknown {
+			t.Fatalf("kind = %v, want unknown", kind)
+		}
+	})
+
+	t.Run("inline path parameter fails closed", func(t *testing.T) {
+		spec := loadYAMLSpec(t, `openapi: 3.1.0
+info: {title: synthetic, version: '1'}
+paths:
+  /x/{id}:
+    get:
+      operationId: inlineOp
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: ok}
+`)
+		pi := spec.Paths.Map()["/x/{id}"]
+		if _, err := classifyRouteResource(pi, pi.Get, "/x/{id}"); err == nil {
+			t.Fatal("inline {id} path parameter was silently classified")
+		}
+	})
+
+	t.Run("unknown canonical component fails closed", func(t *testing.T) {
+		spec := loadYAMLSpec(t, `openapi: 3.1.0
+info: {title: synthetic, version: '1'}
+paths:
+  /x/{id}:
+    get:
+      operationId: unknownOp
+      parameters:
+        - $ref: '#/components/parameters/MysteryId'
+      responses:
+        '200': {description: ok}
+components:
+  parameters:
+    MysteryId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+`)
+		pi := spec.Paths.Map()["/x/{id}"]
+		if _, err := classifyRouteResource(pi, pi.Get, "/x/{id}"); err == nil {
+			t.Fatal("unknown path parameter component was silently classified")
+		}
+	})
+
+	t.Run("header parameters do not influence classification", func(t *testing.T) {
+		spec := loadYAMLSpec(t, `openapi: 3.1.0
+info: {title: synthetic, version: '1'}
+paths:
+  /x/{id}:
+    get:
+      operationId: headerParamOp
+      parameters:
+        - $ref: '#/components/parameters/EnrollmentId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200': {description: ok}
+components:
+  parameters:
+    EnrollmentId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      schema: {type: string}
+`)
+		pi := spec.Paths.Map()["/x/{id}"]
+		kind, err := classifyRouteResource(pi, pi.Get, "/x/{id}")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind != ResourceKindEnrollment {
+			t.Fatalf("kind = %v, want enrollment", kind)
 		}
 	})
 }

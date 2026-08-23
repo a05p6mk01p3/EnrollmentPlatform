@@ -68,11 +68,12 @@ func (e *authnError) Error() string {
 // Runtime is the M4.2 authentication runtime boundary. It is immutable after
 // construction and safe for concurrent use.
 type Runtime struct {
-	policy    *authpolicy.Policy
-	byRoute   map[string]string // routeKey -> operationId, derived at startup from the canonical spec
-	registry  *Registry
-	device    DeviceMTLSSource
-	bodyLimit int64 // effective JSON body limit for Phase B discriminator extraction
+	policy          *authpolicy.Policy
+	byRoute         map[string]string       // routeKey -> operationId, derived at startup from the canonical spec
+	byRouteResource map[string]ResourceKind // routeKey -> path resource kind, derived at startup from canonical path-parameter component identity
+	registry        *Registry
+	device          DeviceMTLSSource
+	bodyLimit       int64 // effective JSON body limit for Phase B discriminator extraction
 }
 
 // NewRuntime prepares the runtime from the canonical spec and the compiled
@@ -91,11 +92,12 @@ func NewRuntime(canonical *openapi3.T, compiled *authpolicy.Policy, registry *Re
 	}
 
 	rt := &Runtime{
-		policy:    compiled,
-		byRoute:   make(map[string]string),
-		registry:  registry,
-		device:    device,
-		bodyLimit: minInt64(generalJSONBytes, absoluteBodyBytes),
+		policy:          compiled,
+		byRoute:         make(map[string]string),
+		byRouteResource: make(map[string]ResourceKind),
+		registry:        registry,
+		device:          device,
+		bodyLimit:       minInt64(generalJSONBytes, absoluteBodyBytes),
 	}
 
 	for path, pi := range canonical.Paths.Map() {
@@ -112,6 +114,15 @@ func NewRuntime(canonical *openapi3.T, compiled *authpolicy.Policy, registry *Re
 				return nil, fmt.Errorf("runtime: duplicate spec route %s (operationIds %q and %q)", key, prev, op.OperationID)
 			}
 			rt.byRoute[key] = op.OperationID
+
+			// Typed route-resource classification (SOL-M4.5-003): derived from
+			// the canonical path-parameter component identity, never from the
+			// path parameter name "id".
+			kind, err := classifyRouteResource(pi, op, path)
+			if err != nil {
+				return nil, err
+			}
+			rt.byRouteResource[key] = kind
 		}
 	}
 
@@ -274,8 +285,9 @@ func (rt *Runtime) ConditionalAuthentication() func(http.Handler) http.Handler {
 // It is generic: it consumes the matched chi path parameters, the typed
 // capability bindings in the AuthenticationContext and the typed conditional
 // requirement, with no handwritten operationId table and no parsing of raw
-// URL strings. The contract names the capability resource path parameter
-// "id" in every capability-resource operation.
+// URL strings. The domain resource TYPE comes from the startup-derived
+// canonical path-parameter component identity (SOL-M4.5-003); the path
+// parameter name "id" by itself never determines the resource type.
 func (rt *Runtime) ResourceBinding() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -294,16 +306,28 @@ func (rt *Runtime) ResourceBinding() func(http.Handler) http.Handler {
 				problem.WriteInternal(w, r)
 				return
 			}
-			id, hasID := pathParam(rctx, "id")
+			resource, ok := rt.matchedResource(r.Method, rctx.RoutePattern(), rctx)
+			if !ok {
+				// A classified route structurally carries the resource path
+				// parameter; its absence at the matched route is an internal
+				// boundary-integrity failure.
+				problem.WriteInternal(w, r)
+				return
+			}
 			cr, hasCR := conditionalRequirementFrom(r.Context())
 
-			switch evaluateResourceBinding(policy, ac, cr, hasCR, id, hasID) {
+			switch evaluateResourceBinding(policy, ac, cr, hasCR, resource) {
 			case resourceBindingPass:
 				next.ServeHTTP(w, r)
 			case resourceBindingUnauthorized:
-				// Same generic 401 as any other capability failure: no resource
-				// oracle beyond the authentication challenge.
-				problem.WriteUnauthorizedBearer(w, r)
+				// The challenge follows the effective required kind
+				// (SOL-M4.2-001): a DeviceMTLS resource mismatch issues no
+				// Bearer challenge and invents no mTLS HTTP challenge.
+				if effectiveRequiredKindIsDeviceMTLS(cr, hasCR) {
+					problem.WriteUnauthorized(w, r)
+				} else {
+					problem.WriteUnauthorizedBearer(w, r)
+				}
 			default:
 				// Internal boundary-integrity failure: no detail, no fallback
 				// to base-OR validation, no guessed credential.
@@ -324,7 +348,7 @@ const (
 
 // evaluateResourceBinding applies the SOL-M4.3-002 final semantics, treating
 // the compiled OperationPolicy as the authority.
-func evaluateResourceBinding(policy *authpolicy.OperationPolicy, ac *AuthenticationContext, cr *ConditionalRequirement, hasCR bool, id string, hasID bool) resourceBindingDecision {
+func evaluateResourceBinding(policy *authpolicy.OperationPolicy, ac *AuthenticationContext, cr *ConditionalRequirement, hasCR bool, resource MatchedResource) resourceBindingDecision {
 	if policy.Conditional() != nil {
 		// Conditional operation: the trusted Phase-B requirement must exist
 		// and agree with the compiled ConditionalSecurity.
@@ -335,7 +359,7 @@ func evaluateResourceBinding(policy *authpolicy.OperationPolicy, ac *Authenticat
 		if !ok {
 			return resourceBindingIntegrity
 		}
-		if !capabilityResourceMatches(ac, kind, id, hasID) {
+		if !capabilityResourceMatches(ac, kind, resource) {
 			return resourceBindingUnauthorized
 		}
 		return resourceBindingPass
@@ -346,12 +370,34 @@ func evaluateResourceBinding(policy *authpolicy.OperationPolicy, ac *Authenticat
 	if hasCR {
 		return resourceBindingIntegrity
 	}
-	if !resourceValidForAlternatives(ac, id, hasID) {
+	if !resourceValidForAlternatives(ac, resource) {
 		return resourceBindingUnauthorized
 	}
 	return resourceBindingPass
 }
 
+// matchedResource resolves the typed route resource for the matched route:
+// the domain resource kind derived at startup from the canonical path
+// template and the matched path-parameter value from chi's parsed route
+// context (never a raw URL string).
+func (rt *Runtime) matchedResource(method, routePattern string, rctx *chi.Context) (MatchedResource, bool) {
+	kind := rt.byRouteResource[routeKey(method, routePattern)]
+	if kind == ResourceKindUnknown {
+		return MatchedResource{Kind: ResourceKindUnknown, Present: false}, true
+	}
+	value, present := pathParam(rctx, "id")
+	if !present || value == "" {
+		// A classified route structurally carries the resource path
+		// parameter; its absence is an integrity failure, not a client
+		// credential rejection.
+		return MatchedResource{}, false
+	}
+	return MatchedResource{Kind: kind, Value: value, Present: true}, true
+}
+
+// compiled policy and returns the effective required kind. Any mismatch is an
+// integrity failure (ok=false): missing/malformed/stale/inconsistent
+// requirements never fall back to base-OR validation.
 // validatedRequiredKind checks the conditional requirement against the
 // compiled policy and returns the effective required kind. Any mismatch is an
 // integrity failure (ok=false): missing/malformed/stale/inconsistent
@@ -384,11 +430,11 @@ func validatedRequiredKind(policy *authpolicy.OperationPolicy, ac *Authenticatio
 // resourceValidForAlternatives evaluates the per-satisfied-alternative
 // resource constraints of a non-conditional operation: at least one complete
 // alternative must be resource-valid.
-func resourceValidForAlternatives(ac *AuthenticationContext, id string, hasID bool) bool {
+func resourceValidForAlternatives(ac *AuthenticationContext, resource MatchedResource) bool {
 	for _, alt := range ac.SatisfiedAlternatives() {
 		valid := true
 		for _, k := range alt.Kinds() {
-			if !capabilityResourceMatches(ac, k, id, hasID) {
+			if !capabilityResourceMatches(ac, k, resource) {
 				valid = false
 				break
 			}
@@ -401,9 +447,18 @@ func resourceValidForAlternatives(ac *AuthenticationContext, id string, hasID bo
 }
 
 // capabilityResourceMatches reports whether the given credential kind's
-// binding (when it is a capability kind) matches the route resource id. A
-// non-capability kind has no resource constraint and always matches.
-func capabilityResourceMatches(ac *AuthenticationContext, kind authpolicy.CredentialKind, id string, hasID bool) bool {
+// binding matches the matched route resource. Each capability/device binding
+// is constrained ONLY against the route resource kind it belongs to:
+//
+//   - RequestAccessToken binds only against a PreOnboardingRequest resource;
+//   - EnrollmentAccessToken binds only against an Enrollment resource;
+//   - DeviceMTLS.IssuedForEnrollmentID binds only against an Enrollment
+//     resource.
+//
+// A route without a path resource imposes no constraint. A path parameter
+// named "id" by itself never determines the domain resource type; the kind
+// comes from the startup-derived canonical route classification.
+func capabilityResourceMatches(ac *AuthenticationContext, kind authpolicy.CredentialKind, resource MatchedResource) bool {
 	switch kind {
 	case authpolicy.CredentialKindRequestAccessToken:
 		b, ok := ac.Binding(kind)
@@ -414,7 +469,13 @@ func capabilityResourceMatches(ac *AuthenticationContext, kind authpolicy.Creden
 		if !ok {
 			return false
 		}
-		return !hasID || req.PreOnboardingRequestID == id
+		if !resource.Present {
+			return true
+		}
+		if resource.Kind != ResourceKindPreOnboardingRequest {
+			return false
+		}
+		return req.PreOnboardingRequestID == resource.Value
 	case authpolicy.CredentialKindEnrollmentAccessToken:
 		b, ok := ac.Binding(kind)
 		if !ok {
@@ -424,7 +485,33 @@ func capabilityResourceMatches(ac *AuthenticationContext, kind authpolicy.Creden
 		if !ok {
 			return false
 		}
-		return !hasID || enr.EnrollmentID == id
+		if !resource.Present {
+			return true
+		}
+		if resource.Kind != ResourceKindEnrollment {
+			return false
+		}
+		return enr.EnrollmentID == resource.Value
+	case authpolicy.CredentialKindDeviceMTLS:
+		b, ok := ac.Binding(kind)
+		if !ok {
+			return false
+		}
+		d, ok := b.DeviceMTLS()
+		if !ok {
+			return false
+		}
+		if !resource.Present {
+			// Routes without a path enrollment resource (createEnrollment
+			// RENEWAL/REKEY) impose no exact-certificate constraint.
+			return true
+		}
+		// The exact certificate/enrollment binding applies ONLY to a route
+		// resource structurally known to be an Enrollment.
+		if resource.Kind != ResourceKindEnrollment {
+			return false
+		}
+		return d.IssuedForEnrollmentID == resource.Value
 	default:
 		return true
 	}
@@ -494,8 +581,14 @@ func (rt *Runtime) authenticate(r *http.Request, policy *authpolicy.OperationPol
 	// DeviceMTLS signal via the abstract source port only.
 	if containsKind(eligible, authpolicy.CredentialKindDeviceMTLS) {
 		var device *DeviceCredential
+		var srcErr error
 		if rt.device != nil {
-			device = rt.device.DeviceCredential(r)
+			device, srcErr = rt.device.DeviceCredential(r)
+		}
+		if srcErr != nil {
+			// The trusted-proxy source could not be evaluated (dependency
+			// failure): never treat this as "no device credential".
+			return nil, &authnError{kind: errorKindDependencyUnavailable}
 		}
 		if device != nil {
 			auth, ok := rt.registry.Get(authpolicy.CredentialKindDeviceMTLS)
@@ -669,6 +762,14 @@ func containsKind(kinds []authpolicy.CredentialKind, kind authpolicy.CredentialK
 	return false
 }
 
+// effectiveRequiredKindIsDeviceMTLS reports whether the effective
+// conditional requirement mandates DeviceMTLS. It is used only to select the
+// WWW-Authenticate challenge for a resource-binding rejection: a DeviceMTLS
+// mismatch issues no Bearer challenge.
+func effectiveRequiredKindIsDeviceMTLS(cr *ConditionalRequirement, hasCR bool) bool {
+	return hasCR && cr != nil && cr.RequiredKind() == authpolicy.CredentialKindDeviceMTLS
+}
+
 // validateBinding enforces that a successful authenticator result carries a
 // valid, kind-matching, non-empty typed binding. A nil binding, a binding for
 // a different CredentialKind, a variant incompatible with the kind, or an
@@ -703,8 +804,8 @@ func validateBinding(kind authpolicy.CredentialKind, b *Binding) error {
 		}
 	case authpolicy.CredentialKindDeviceMTLS:
 		d, ok := b.DeviceMTLS()
-		if !ok || d.DeviceID == "" || d.CertificateID == "" {
-			return fmt.Errorf("runtime: %q binding lacks device_id/certificate_id", kind)
+		if !ok || d.DeviceID == "" || d.CertificateID == "" || d.IssuedForEnrollmentID == "" {
+			return fmt.Errorf("runtime: %q binding lacks device_id/certificate_id/issued_for_enrollment_id", kind)
 		}
 	default:
 		return fmt.Errorf("runtime: unknown binding kind %q", kind)
