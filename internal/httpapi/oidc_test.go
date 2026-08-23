@@ -91,6 +91,7 @@ func oidcHandler(t *testing.T, humanAuth, adminAuth authruntime.Authenticator) (
 	srv, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(oidcRegistry(t, humanAuth, adminAuth)),
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
+		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

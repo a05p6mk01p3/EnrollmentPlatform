@@ -12,6 +12,7 @@ import (
 
 	authpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/policy"
 	authruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/runtime"
+	authzruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authz/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
@@ -284,12 +285,18 @@ func appendUniqueKind(kinds []authpolicy.CredentialKind, k authpolicy.Credential
 	return append(kinds, k)
 }
 
+func testAuthzRegistry() *authzruntime.Registry {
+	r, _ := authzruntime.NewRegistry(authzruntime.AllowAllScopeAuthorizer(), authzruntime.AllowAllOpenEvaluator(), nil)
+	return r
+}
+
 func newTestHandler(t testing.TB) (http.Handler, *probeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
 	srv, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(testAuthnRegistry()),
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
+		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

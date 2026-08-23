@@ -91,6 +91,13 @@ type MatchedResource struct {
 // the referenced component name is recognized, and the kind is never inferred
 // from the Ref suffix, the wire parameter name, "{id}", operationId, or route
 // literals.
+// ClassifyRouteResource derives the ResourceKind of a route from the
+// canonical path-parameter component identity of its path item and operation
+// parameters.
+func ClassifyRouteResource(pi *openapi3.PathItem, op *openapi3.Operation, path string) (ResourceKind, error) {
+	return classifyRouteResource(pi, op, path)
+}
+
 func classifyRouteResource(pi *openapi3.PathItem, op *openapi3.Operation, path string) (ResourceKind, error) {
 	kind := ResourceKindUnknown
 	found := false

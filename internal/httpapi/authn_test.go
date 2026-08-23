@@ -138,6 +138,7 @@ func newAuthTestHandler(t *testing.T, reg *authruntime.Registry, source authrunt
 	srv, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(completeTestRegistry(t, reg)),
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(source)),
+		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

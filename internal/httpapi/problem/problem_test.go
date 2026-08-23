@@ -141,6 +141,47 @@ func TestWriteInternalLeaksNoDetail(t *testing.T) {
 	}
 }
 
+func TestWriteScopeDenied(t *testing.T) {
+	r := newRequest("/v1/admin/pre-onboarding-requests")
+	r = r.WithContext(WithCorrelationID(r.Context(), "corr-scope-denied"))
+
+	rr := httptest.NewRecorder()
+	WriteScopeDenied(rr, r)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+	if got := rr.Header().Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q, want empty", got)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/problem+json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := rr.Header().Get("X-Correlation-ID"); got != "corr-scope-denied" {
+		t.Fatalf("X-Correlation-ID = %q", got)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if m["type"] != TypeScopeDenied {
+		t.Errorf("type = %v, want %s", m["type"], TypeScopeDenied)
+	}
+	if m["title"] != "Access denied" {
+		t.Errorf("title = %v", m["title"])
+	}
+	if m["status"] != float64(http.StatusForbidden) {
+		t.Errorf("status = %v", m["status"])
+	}
+	if m["error_code"] != "SCOPE_DENIED" {
+		t.Errorf("error_code = %v", m["error_code"])
+	}
+	if m["retryable"] != false {
+		t.Errorf("retryable = %v, want false", m["retryable"])
+	}
+}
+
 func TestCorrelationIDContextRoundTrip(t *testing.T) {
 	ctx := WithCorrelationID(context.Background(), "abc-123")
 	if got := CorrelationID(ctx); got != "abc-123" {

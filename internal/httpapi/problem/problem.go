@@ -20,6 +20,7 @@ const (
 	TypePayloadTooLarge        = "https://pki.example/errors/payload-too-large"
 	TypeUnsupportedMediaType   = "https://pki.example/errors/unsupported-media-type"
 	TypeAuthenticationRequired = "https://pki.example/errors/authentication-required"
+	TypeScopeDenied            = "https://pki.example/errors/scope-denied"
 	TypeDependencyUnavailable  = "https://pki.example/errors/dependency-unavailable"
 	// TypeInternalError is infrastructure-only (server bug); it is not a
 	// contract machine code and must not be relied upon by clients.
@@ -154,6 +155,17 @@ func WriteUnauthorized(w http.ResponseWriter, r *http.Request) {
 		Title:     "Authentication required",
 		Status:    http.StatusUnauthorized,
 		ErrorCode: "AUTHENTICATION_REQUIRED",
+	})
+}
+
+// WriteScopeDenied emits 403 SCOPE_DENIED (Access denied), the contracted
+// response when an authenticated request lacks required domain scope or policy approval.
+func WriteScopeDenied(w http.ResponseWriter, r *http.Request) {
+	Write(w, r, Problem{
+		Type:      TypeScopeDenied,
+		Title:     "Access denied",
+		Status:    http.StatusForbidden,
+		ErrorCode: "SCOPE_DENIED",
 	})
 }
 
