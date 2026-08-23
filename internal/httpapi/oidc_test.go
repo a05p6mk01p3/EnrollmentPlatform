@@ -88,7 +88,10 @@ func oidcRegistry(t *testing.T, humanAuth, adminAuth authruntime.Authenticator) 
 func oidcHandler(t *testing.T, humanAuth, adminAuth authruntime.Authenticator) (http.Handler, *probeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
-	srv, err := httpapi.NewServer(cfg, httpapi.WithAuthnRegistry(oidcRegistry(t, humanAuth, adminAuth)))
+	srv, err := httpapi.NewServer(cfg,
+		httpapi.WithAuthnRegistry(oidcRegistry(t, humanAuth, adminAuth)),
+		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
+	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

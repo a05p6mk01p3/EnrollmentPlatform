@@ -50,15 +50,19 @@ type Server struct {
 type Option func(*Server)
 
 // WithAuthnRegistry replaces the default deny-by-default authenticator
-// registry. The default registry rejects every credential until the concrete
-// authenticators (M4.3+) exist.
+// registry. The default registry covers every contractual credential kind
+// with a fail-closed authenticator; a supplied registry is validated against
+// the compiled policy at construction (SOL-M4.6-001), so a registry missing a
+// policy-referenced kind fails construction.
 func WithAuthnRegistry(registry *authruntime.Registry) Option {
 	return func(s *Server) { s.authnRegistry = registry }
 }
 
-// WithDeviceMTLSSource wires the candidate device-mTLS credential source.
-// The concrete trusted-proxy boundary is M4.5; a nil source (the default)
-// means the DeviceMTLS kind can never authenticate (fail closed).
+// WithDeviceMTLSSource wires the candidate device-mTLS credential source. The
+// concrete trusted-proxy boundary is M4.5. Because the canonical policy
+// references DeviceMTLS, construction fails if the source is nil
+// (SOL-M4.6-001); there is no silent "DeviceMTLS can never authenticate"
+// default on the production path.
 func WithDeviceMTLSSource(source authruntime.DeviceMTLSSource) Option {
 	return func(s *Server) { s.deviceSource = source }
 }
@@ -95,6 +99,18 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 	if registry == nil {
 		registry = authruntime.DefaultDenyRegistry()
 	}
+
+	// SOL-M4.6-001: startup integrity is enforced on this production
+	// construction path, not in a separate opt-in helper. The server must
+	// never start with a compiled policy referencing a credential kind that
+	// has no registered authenticator, or with a referenced DeviceMTLS kind
+	// whose trusted-proxy source is missing. This check is unavoidable for
+	// anyone constructing a Server; the only way to satisfy it is to supply a
+	// complete registry and (where DeviceMTLS is referenced) a real source.
+	if err := authruntime.ValidateRegistry(compiledAuthPolicy, registry, s.deviceSource); err != nil {
+		return nil, fmt.Errorf("validating authentication registry against compiled policy: %w", err)
+	}
+
 	rt, err := authruntime.NewRuntime(canonical, compiledAuthPolicy, registry, s.deviceSource, cfg.GeneralJSONDefaultBytes, cfg.AbsoluteRequestBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("preparing authentication runtime: %w", err)

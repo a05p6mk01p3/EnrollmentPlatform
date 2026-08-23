@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -134,19 +135,65 @@ func (p *authProbeSSI) CompleteEnrollment(ctx context.Context, request openapi.C
 func newAuthTestHandler(t *testing.T, reg *authruntime.Registry, source authruntime.DeviceMTLSSource) (http.Handler, *authProbeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
-	var opts []httpapi.Option
-	if reg != nil {
-		opts = append(opts, httpapi.WithAuthnRegistry(reg))
-	}
-	if source != nil {
-		opts = append(opts, httpapi.WithDeviceMTLSSource(source))
-	}
-	srv, err := httpapi.NewServer(cfg, opts...)
+	srv, err := httpapi.NewServer(cfg,
+		httpapi.WithAuthnRegistry(completeTestRegistry(t, reg)),
+		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(source)),
+	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	p := &authProbeSSI{probeSSI: probeSSI{calls: map[string]int{}}}
 	return srv.Handler(p), p
+}
+
+// completeTestRegistry returns a registry covering all six contractual kinds,
+// preserving every authenticator the caller supplied and filling any missing
+// kind with a fail-closed test double (reject-all bearer, accept-device). The
+// M4.6 production constructor (SOL-M4.6-001) validates full registry coverage,
+// so per-request behavior tests construct a fully-covered registry here; the
+// genuinely-missing-kind -> 503 path is exercised at the runtime package
+// level, not through NewServer.
+func completeTestRegistry(t *testing.T, reg *authruntime.Registry) *authruntime.Registry {
+	t.Helper()
+	all := []authpolicy.CredentialKind{
+		authpolicy.CredentialKindHumanOIDC,
+		authpolicy.CredentialKindAdminOIDC,
+		authpolicy.CredentialKindTemporaryPrincipalToken,
+		authpolicy.CredentialKindRequestAccessToken,
+		authpolicy.CredentialKindEnrollmentAccessToken,
+		authpolicy.CredentialKindDeviceMTLS,
+	}
+	auths := make([]authruntime.Authenticator, 0, len(all))
+	for _, kind := range all {
+		if reg != nil {
+			if a, ok := reg.Get(kind); ok {
+				auths = append(auths, a)
+				continue
+			}
+		}
+		if kind == authpolicy.CredentialKindDeviceMTLS {
+			auths = append(auths, acceptDeviceMTLS())
+		} else {
+			auths = append(auths, rejectAll(kind))
+		}
+	}
+	r, err := authruntime.NewRegistry(auths...)
+	if err != nil {
+		t.Fatalf("completeTestRegistry: %v", err)
+	}
+	return r
+}
+
+// completeTestDeviceSource substitutes a no-device source for a nil source so
+// the production constructor's DeviceMTLS-source validation passes; in
+// per-request tests a nil source means "no device credential present".
+func completeTestDeviceSource(source authruntime.DeviceMTLSSource) authruntime.DeviceMTLSSource {
+	if source != nil {
+		return source
+	}
+	return authruntime.DeviceTestSource{Credential: func(r *http.Request) (*authruntime.DeviceCredential, error) {
+		return nil, nil
+	}}
 }
 
 // doAuth performs a request with explicit headers (no default credential).
@@ -757,18 +804,118 @@ func TestMiddlewareOrderPinned(t *testing.T) {
 	assertNoHandlerCall(t, &p.probeSSI)
 }
 
-// TestProductionDefaultDeniesEverything proves the out-of-the-box Server
-// (no options) never authenticates: every credential is rejected (401), even
-// a well-formed one, until concrete authenticators are wired (M4.3+).
-func TestProductionDefaultDeniesEverything(t *testing.T) {
+// TestProductionStartupRequiresCompleteAuthenticationComposition is the
+// SOL-M4.6-001 regression: the production constructor itself must refuse to
+// build a server when a compiled-policy-referenced runtime component is
+// absent, before any request can be served. composition.Build is not the only
+// gate — NewServer is.
+func TestProductionStartupRequiresCompleteAuthenticationComposition(t *testing.T) {
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
-	srv, err := httpapi.NewServer(cfg)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
+
+	// No options: the default registry covers every kind fail-closed, but the
+	// canonical policy references DeviceMTLS and no trusted-proxy source is
+	// wired -> construction must fail.
+	_, err := httpapi.NewServer(cfg)
+	if err == nil {
+		t.Fatal("NewServer with no options must fail: DeviceMTLS trusted-proxy source is missing")
 	}
-	h := srv.Handler(&authProbeSSI{probeSSI: probeSSI{calls: map[string]int{}}})
-	rr := doAuth(t, h, "GET", "/v1/me/authorizations", "", map[string]string{"Authorization": "Bearer anything"})
-	assertProblem(t, rr, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED")
+	var mae *authruntime.MissingAuthenticatorError
+	if !errors.As(err, &mae) || mae.Kind != authpolicy.CredentialKindDeviceMTLS {
+		t.Fatalf("NewServer error = %v; want MissingAuthenticatorError{DeviceMTLS}", err)
+	}
+
+	// A device source alone is not enough: a registry missing a referenced
+	// bearer kind must also fail construction.
+	missingHuman := registry(t,
+		acceptOnly(authpolicy.CredentialKindAdminOIDC, tokAdmin),
+		acceptOnly(authpolicy.CredentialKindTemporaryPrincipalToken, tokTemp),
+		acceptOnly(authpolicy.CredentialKindRequestAccessToken, tokReq),
+		acceptOnly(authpolicy.CredentialKindEnrollmentAccessToken, tokEnroll),
+		acceptDeviceMTLS(),
+	)
+	_, err = httpapi.NewServer(cfg,
+		httpapi.WithAuthnRegistry(missingHuman),
+		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
+	)
+	if err == nil {
+		t.Fatal("NewServer must fail: HumanOIDC is referenced by the policy but has no authenticator")
+	}
+	if !errors.As(err, &mae) || mae.Kind != authpolicy.CredentialKindHumanOIDC {
+		t.Fatalf("NewServer error = %v; want MissingAuthenticatorError{HumanOIDC}", err)
+	}
+
+	// A complete registry plus a real source constructs successfully.
+	if _, err := httpapi.NewServer(cfg,
+		httpapi.WithAuthnRegistry(completeTestRegistry(t, nil)),
+		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
+	); err != nil {
+		t.Fatalf("NewServer with a complete composition should succeed: %v", err)
+	}
+}
+
+// typedNilBearerImpl is a pointer-backed Authenticator whose nil pointer is the
+// typed-nil bearer-authenticator case for the M4.6-003 regressions.
+type typedNilBearerImpl struct{}
+
+func (*typedNilBearerImpl) Kind() authpolicy.CredentialKind {
+	return authpolicy.CredentialKindHumanOIDC
+}
+
+func (*typedNilBearerImpl) Authenticate(context.Context, *authruntime.Credential) authruntime.AuthenticationResult {
+	return authruntime.AuthenticationResult{Decision: authruntime.DecisionRejected}
+}
+
+// typedNilDeviceSourceImpl is a pointer-backed DeviceMTLSSource whose nil
+// pointer is the typed-nil device-source case.
+type typedNilDeviceSourceImpl struct{}
+
+func (*typedNilDeviceSourceImpl) DeviceCredential(*http.Request) (*authruntime.DeviceCredential, error) {
+	return nil, nil
+}
+
+// TestNewServerRejectsTypedNilBearerAuthenticator is the M4.6-003 regression
+// for the bearer component: a typed-nil Authenticator cannot be assembled into
+// the registry that feeds httpapi.NewServer. The registry constructor is the
+// first boundary of the production construction path, so the composition fails
+// there with a typed startup error and no Server can be constructed.
+func TestNewServerRejectsTypedNilBearerAuthenticator(t *testing.T) {
+	var ptr *typedNilBearerImpl
+	var human authruntime.Authenticator = ptr
+
+	reg, err := authruntime.NewRegistry(
+		human,
+		acceptOnly(authpolicy.CredentialKindAdminOIDC, tokAdmin),
+		acceptOnly(authpolicy.CredentialKindTemporaryPrincipalToken, tokTemp),
+		acceptOnly(authpolicy.CredentialKindRequestAccessToken, tokReq),
+		acceptOnly(authpolicy.CredentialKindEnrollmentAccessToken, tokEnroll),
+		acceptDeviceMTLS(),
+	)
+	if reg != nil {
+		t.Fatal("registry must be nil: typed-nil bearer authenticator must not become a usable entry")
+	}
+	var ne *authruntime.NilAuthenticatorError
+	if !errors.As(err, &ne) {
+		t.Fatalf("NewRegistry err = %v; want NilAuthenticatorError", err)
+	}
+}
+
+// TestNewServerRejectsTypedNilDeviceSource is the M4.6-003 regression for the
+// DeviceMTLS component through the real production constructor: a typed-nil
+// trusted-proxy source must be treated exactly like an absent source and fail
+// startup validation.
+func TestNewServerRejectsTypedNilDeviceSource(t *testing.T) {
+	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
+	var ptr *typedNilDeviceSourceImpl
+	var src authruntime.DeviceMTLSSource = ptr
+
+	_, err := httpapi.NewServer(cfg,
+		httpapi.WithAuthnRegistry(completeTestRegistry(t, nil)),
+		httpapi.WithDeviceMTLSSource(src),
+	)
+	var mae *authruntime.MissingAuthenticatorError
+	if !errors.As(err, &mae) || mae.Kind != authpolicy.CredentialKindDeviceMTLS {
+		t.Fatalf("NewServer err = %v; want MissingAuthenticatorError{DeviceMTLS}", err)
+	}
 }
 
 // TestConditionalWWWAuthenticateFromEffectiveRequirement pins SOL-M4.2-001:

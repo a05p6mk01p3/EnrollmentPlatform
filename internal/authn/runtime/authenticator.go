@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 
 	"github.com/go-chi/chi/v5"
 
@@ -302,13 +303,43 @@ type Registry struct {
 	byKind map[authpolicy.CredentialKind]Authenticator
 }
 
+// NilAuthenticatorError reports an Authenticator that is nil or holds a
+// typed-nil value (a nil pointer/interface/map/slice/func/channel implementing
+// Authenticator). Such a value is not a usable runtime component and must fail
+// registry construction rather than be stored, skipped, or returned later.
+type NilAuthenticatorError struct{}
+
+func (e *NilAuthenticatorError) Error() string {
+	return "runtime: nil or typed-nil authenticator is not a usable component"
+}
+
+// isNilLike reports whether v is nil or holds a typed-nil value of a nilable
+// kind. A typed-nil pointer (or interface/map/slice/func/channel) implementing
+// Authenticator or DeviceMTLSSource is not a usable runtime component even
+// though the surrounding interface is non-nil. IsNil is only called for
+// nilable kinds, so a concrete non-pointer implementation can never panic.
+func isNilLike(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
 // NewRegistry builds a registry from the given authenticators. Two
-// authenticators for the same CredentialKind are a construction error.
+// authenticators for the same CredentialKind are a construction error, as is
+// any nil or typed-nil authenticator (SOL-M4.6-003): an effectively nil
+// component must never become a retrievable registry entry.
 func NewRegistry(authenticators ...Authenticator) (*Registry, error) {
 	r := &Registry{byKind: make(map[authpolicy.CredentialKind]Authenticator, len(authenticators))}
 	for _, a := range authenticators {
-		if a == nil {
-			continue
+		if isNilLike(a) {
+			return nil, &NilAuthenticatorError{}
 		}
 		if _, dup := r.byKind[a.Kind()]; dup {
 			return nil, &DuplicateKindError{Kind: a.Kind()}
@@ -318,10 +349,15 @@ func NewRegistry(authenticators ...Authenticator) (*Registry, error) {
 	return r, nil
 }
 
-// Get returns the authenticator for a kind.
+// Get returns the authenticator for a kind. A nil or typed-nil authenticator
+// is reported as unavailable (ok=false): the registry never exposes an
+// effectively nil component as usable, even defensively (SOL-M4.6-003).
 func (r *Registry) Get(kind authpolicy.CredentialKind) (Authenticator, bool) {
 	a, ok := r.byKind[kind]
-	return a, ok
+	if !ok || isNilLike(a) {
+		return nil, false
+	}
+	return a, true
 }
 
 // DefaultDenyRegistry returns the production placeholder registry: every
