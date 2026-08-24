@@ -35,6 +35,7 @@ func TestCanonicalSpecRouteResourceClassification(t *testing.T) {
 		want ResourceKind
 	}{
 		{"GET /v1/pre-onboarding-requests/{id}", ResourceKindPreOnboardingRequest},
+		{"GET /v1/admin/pre-onboarding-requests/{id}", ResourceKindPreOnboardingRequest},
 		{"POST /v1/pre-onboarding-requests", ResourceKindUnknown},
 		{"POST /v1/enrollments", ResourceKindUnknown},
 		{"GET /v1/enrollments/{id}", ResourceKindEnrollment},
@@ -118,6 +119,17 @@ func TestCanonicalSpecMatchedResource(t *testing.T) {
 		}
 		if !res.Present || res.Kind != ResourceKindPreOnboardingRequest || res.Value != "por-1" {
 			t.Fatalf("matched resource = %+v, want PreOnboardingRequest por-1", res)
+		}
+	})
+
+	t.Run("admin pre-onboarding route is a PreOnboardingRequest resource", func(t *testing.T) {
+		rctx := newRctx("/v1/admin/pre-onboarding-requests/{id}", map[string]string{"id": "por-2"})
+		res, ok := rt.matchedResource(http.MethodGet, rctx.RoutePattern(), rctx)
+		if !ok {
+			t.Fatal("matchedResource failed")
+		}
+		if !res.Present || res.Kind != ResourceKindPreOnboardingRequest || res.Value != "por-2" {
+			t.Fatalf("matched resource = %+v, want PreOnboardingRequest por-2", res)
 		}
 	})
 }

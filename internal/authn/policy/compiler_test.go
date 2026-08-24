@@ -135,8 +135,8 @@ func TestCanonicalPolicyMatrix(t *testing.T) {
 		t.Fatalf("Compile canonical: %v", err)
 	}
 
-	if got := p.OperationCount(); got != 20 {
-		t.Fatalf("OperationCount = %d; want 20", got)
+	if got := p.OperationCount(); got != 21 {
+		t.Fatalf("OperationCount = %d; want 21", got)
 	}
 
 	want := map[string]string{
@@ -151,6 +151,7 @@ func TestCanonicalPolicyMatrix(t *testing.T) {
 		"completeEnrollment":               "DeviceMTLS OR EnrollmentAccessToken",
 		"getCurrentTrustBundle":            "NO_APPLICATION_CREDENTIAL",
 		"adminListPreOnboardingRequests":   "AdminOIDC",
+		"adminGetPreOnboardingRequest":     "AdminOIDC",
 		"adminApprovePreOnboardingRequest": "AdminOIDC",
 		"adminRejectPreOnboardingRequest":  "AdminOIDC",
 		"adminCreateDeviceRebindRequest":   "AdminOIDC",
@@ -161,8 +162,8 @@ func TestCanonicalPolicyMatrix(t *testing.T) {
 		"adminGetRevocationRequest":        "AdminOIDC",
 		"adminListRevocationCertificates":  "AdminOIDC",
 	}
-	if len(want) != 20 {
-		t.Fatalf("expected matrix has %d entries; want 20", len(want))
+	if len(want) != 21 {
+		t.Fatalf("expected matrix has %d entries; want 21", len(want))
 	}
 
 	seen := map[string]bool{}

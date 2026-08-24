@@ -80,6 +80,9 @@ func TestCompileCanonicalSpecDiscoversExactlyElevenIdempotentOperations(t *testi
 	if _, ok := p.Operation("getPreOnboardingRequest"); ok {
 		t.Errorf("getPreOnboardingRequest should not be part of the idempotency policy")
 	}
+	if _, ok := p.Operation("adminGetPreOnboardingRequest"); ok {
+		t.Errorf("adminGetPreOnboardingRequest should not be part of the idempotency policy")
+	}
 }
 
 func TestCompileCanonicalSecretReplayDiscovery(t *testing.T) {

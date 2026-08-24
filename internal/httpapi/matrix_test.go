@@ -155,6 +155,12 @@ func authenticationMatrix() []matrixCase {
 			handler: "AdminListPreOnboardingRequests", status: http.StatusOK,
 		},
 		{
+			name: "adminGetPreOnboardingRequest", opID: "adminGetPreOnboardingRequest",
+			method: "GET", path: "/v1/admin/pre-onboarding-requests/por-123",
+			want:    []authpolicy.CredentialKind{authpolicy.CredentialKindAdminOIDC},
+			handler: "AdminGetPreOnboardingRequest", status: http.StatusOK,
+		},
+		{
 			name: "adminApprovePreOnboardingRequest", opID: "adminApprovePreOnboardingRequest",
 			method: "POST", path: "/v1/admin/pre-onboarding-requests/por-123/approve",
 			body:    `{"reason":"approved","expected_status":"PENDING_APPROVAL"}`,
@@ -316,8 +322,8 @@ var allSixKinds = []authpolicy.CredentialKind{
 // credential kind is presented, through the real router/middleware pipeline.
 func TestAuthenticationMatrixPositive(t *testing.T) {
 	cases := authenticationMatrix()
-	if len(cases) != 23 {
-		t.Fatalf("matrix has %d cases; want 23 (20 operations with 3 createEnrollment + 2 completeEnrollment branches)", len(cases))
+	if len(cases) != 24 {
+		t.Fatalf("matrix has %d cases; want 24 (21 operations with 3 createEnrollment + 2 completeEnrollment branches)", len(cases))
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -419,13 +425,13 @@ func TestAuthenticationMatrixParityWithCompiledPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compiled.OperationCount() != 20 {
-		t.Fatalf("compiled operation count = %d; want 20", compiled.OperationCount())
+	if compiled.OperationCount() != 21 {
+		t.Fatalf("compiled operation count = %d; want 21", compiled.OperationCount())
 	}
 
 	cases := authenticationMatrix()
-	if len(cases) != 23 {
-		t.Fatalf("matrix has %d cases; want 23", len(cases))
+	if len(cases) != 24 {
+		t.Fatalf("matrix has %d cases; want 24", len(cases))
 	}
 
 	for _, tc := range cases {

@@ -205,8 +205,8 @@ func TestRouteIndexDerivedFromSpec(t *testing.T) {
 			}
 		}
 	}
-	if want != 20 {
-		t.Fatalf("spec operations = %d, want 20", want)
+	if want != 21 {
+		t.Fatalf("spec operations = %d, want 21", want)
 	}
 	if len(e.index) != want {
 		t.Fatalf("index entries = %d, want %d", len(e.index), want)

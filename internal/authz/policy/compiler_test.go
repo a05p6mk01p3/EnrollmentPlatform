@@ -27,13 +27,14 @@ func TestCompileCanonicalSpec(t *testing.T) {
 		t.Fatalf("Compile canonical: %v", err)
 	}
 
-	if p.OperationCount() != 20 {
-		t.Fatalf("OperationCount = %d, want 20", p.OperationCount())
+	if p.OperationCount() != 21 {
+		t.Fatalf("OperationCount = %d, want 21", p.OperationCount())
 	}
 
 	// 1. Check confirmed device:approve operations
 	deviceApproveOps := []string{
 		"adminListPreOnboardingRequests",
+		"adminGetPreOnboardingRequest",
 		"adminApprovePreOnboardingRequest",
 		"adminRejectPreOnboardingRequest",
 	}

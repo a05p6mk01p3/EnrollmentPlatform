@@ -233,8 +233,8 @@ func TestGeneratedRoutesMatchSpecPaths(t *testing.T) {
 		}
 	}
 
-	if len(specOps) != 20 || len(routerRoutes) != 20 {
-		t.Fatalf("spec operations = %d, registered routes = %d, want 20 each", len(specOps), len(routerRoutes))
+	if len(specOps) != 21 || len(routerRoutes) != 21 {
+		t.Fatalf("spec operations = %d, registered routes = %d, want 21 each", len(specOps), len(routerRoutes))
 	}
 	for k := range specOps {
 		if !routerRoutes[k] {

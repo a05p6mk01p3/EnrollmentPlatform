@@ -29,6 +29,10 @@ func TestContractParity(t *testing.T) {
 			kind:           policy.PolicyKindConfirmedScopes,
 			requiredScopes: []string{"device:approve"},
 		},
+		"adminGetPreOnboardingRequest": {
+			kind:           policy.PolicyKindConfirmedScopes,
+			requiredScopes: []string{"device:approve"},
+		},
 		"adminApprovePreOnboardingRequest": {
 			kind:           policy.PolicyKindConfirmedScopes,
 			requiredScopes: []string{"device:approve"},

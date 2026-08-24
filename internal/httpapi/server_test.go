@@ -110,6 +110,16 @@ func (p *probeSSI) AdminListPreOnboardingRequests(ctx context.Context, request o
 	return openapi.AdminListPreOnboardingRequests200JSONResponse{}, nil
 }
 
+func (p *probeSSI) AdminGetPreOnboardingRequest(ctx context.Context, request openapi.AdminGetPreOnboardingRequestRequestObject) (openapi.AdminGetPreOnboardingRequestResponseObject, error) {
+	p.record("AdminGetPreOnboardingRequest")
+	return openapi.AdminGetPreOnboardingRequest200JSONResponse{
+		Body: openapi.PreOnboardingRequest{
+			PreOnboardingRequestId: request.Id,
+			PartnerId:              "P1",
+		},
+	}, nil
+}
+
 func (p *probeSSI) AdminApprovePreOnboardingRequest(ctx context.Context, request openapi.AdminApprovePreOnboardingRequestRequestObject) (openapi.AdminApprovePreOnboardingRequestResponseObject, error) {
 	p.record("AdminApprovePreOnboardingRequest")
 	return openapi.AdminApprovePreOnboardingRequest200JSONResponse{}, nil
