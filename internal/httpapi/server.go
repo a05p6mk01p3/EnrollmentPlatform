@@ -30,6 +30,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi/middleware"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi/problem"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	preonboardingapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/application"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
@@ -71,6 +72,9 @@ type Server struct {
 	// permissive default.
 	resourceOwnership *resourceownership.Service
 
+	// preonboarding is the M5.5 Pre-Onboarding lifecycle application service.
+	preonboarding *preonboardingapp.Service
+
 	// Option inputs, resolved by NewServer.
 	authnRegistry             *authruntime.Registry
 	authnRegistryExplicit     bool
@@ -79,6 +83,7 @@ type Server struct {
 	authzRegistryExplicit     bool
 	partnerAuthExplicit       bool
 	resourceOwnershipExplicit bool
+	preonboardingExplicit     bool
 }
 
 // Option customizes Server construction.
@@ -135,6 +140,17 @@ func WithResourceOwnershipService(svc *resourceownership.Service) Option {
 	return func(s *Server) {
 		s.resourceOwnership = svc
 		s.resourceOwnershipExplicit = true
+	}
+}
+
+// WithPreOnboardingService wires the M5.5 Pre-Onboarding lifecycle application
+// service. It is a mandatory dependency: NewServer fails when it is omitted
+// (no implicit unavailable/permissive fallback), and a nil or typed-nil
+// service also fails construction.
+func WithPreOnboardingService(svc *preonboardingapp.Service) Option {
+	return func(s *Server) {
+		s.preonboarding = svc
+		s.preonboardingExplicit = true
 	}
 }
 
@@ -243,6 +259,22 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 		return nil, fmt.Errorf("validating resource ownership service: %w", err)
 	}
 
+	// M5.5 Pre-Onboarding lifecycle: mandatory dependency, no implicit fallback.
+	// The service must be supplied explicitly (production wires the explicit
+	// fail-closed unavailable provider while no real provider exists); a
+	// missing or nil service fails construction before any request is served.
+	// The service's own structural integrity is revalidated here at the
+	// startup boundary.
+	if !s.preonboardingExplicit {
+		return nil, fmt.Errorf("validating pre-onboarding service: no pre-onboarding service supplied; wire one explicitly with WithPreOnboardingService")
+	}
+	if s.preonboarding == nil {
+		return nil, fmt.Errorf("validating pre-onboarding service: nil or typed-nil service")
+	}
+	if err := s.preonboarding.Validate(); err != nil {
+		return nil, fmt.Errorf("validating pre-onboarding service: %w", err)
+	}
+
 	enforcer, err := middleware.NewEnforcer(canonical, cfg.GeneralJSONDefaultBytes, cfg.AbsoluteRequestBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("preparing contract enforcement: %w", err)
@@ -255,15 +287,20 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 // implementation. The returned handler owns correlation, routing, authentication,
 // contract enforcement and domain authorization; the caller is responsible for the listener.
 //
-// The M5.2 partner authorization and M5.3 resource ownership boundaries are
-// MANDATORY parts of this composition: the supplied StrictServerInterface is
-// always wrapped by the partner/scope selection decorator and the resource
-// visibility decorator before the generated strict handler, so there is no
-// handler-construction path that registers protected business handlers while
-// skipping M5.2 or M5.3. The wrappers are private (wrapPartnerAuth,
-// wrapResourceOwnership) and cannot be bypassed through the public surface.
+// The M5.2 partner authorization, M5.3 resource ownership, and M5.5 pre-onboarding
+// boundaries are MANDATORY parts of this composition: the supplied StrictServerInterface is
+// wrapped in explicit order:
+//
+//	wrapResourceOwnership(
+//	  wrapPartnerAuth(
+//	    wrapPreOnboarding(ssi),
+//	  ),
+//	)
+//
+// The wrappers are private (wrapPartnerAuth, wrapResourceOwnership, wrapPreOnboarding)
+// and cannot be bypassed through the public surface.
 func (s *Server) Handler(ssi openapi.StrictServerInterface) http.Handler {
-	strictSI := openapi.NewStrictHandlerWithOptions(s.wrapResourceOwnership(s.wrapPartnerAuth(ssi)), nil, openapi.StrictHTTPServerOptions{
+	strictSI := openapi.NewStrictHandlerWithOptions(s.wrapResourceOwnership(s.wrapPartnerAuth(s.wrapPreOnboarding(ssi))), nil, openapi.StrictHTTPServerOptions{
 		// Defense in depth: with enforcement upstream these should not fire,
 		// but if the generated decoder or a handler fails, answers stay
 		// RFC 9457-shaped.

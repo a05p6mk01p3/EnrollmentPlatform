@@ -39,7 +39,7 @@ func matrixHeaders(idempotent, ifMatch bool) map[string]string {
 		h["Idempotency-Key"] = validIdempotencyKey
 	}
 	if ifMatch {
-		h["If-Match"] = `"4"`
+		h["If-Match"] = testR123ETag
 	}
 	return h
 }
@@ -351,14 +351,16 @@ func TestAuthenticationMatrixPositive(t *testing.T) {
 						// partner authorization boundary and the inner handler is
 						// never invoked.
 						wantCalls = 0
-					case tc.opID == "createPreOnboardingRequest" && kind == authpolicy.CredentialKindTemporaryPrincipalToken:
-						// A synthetically authenticated Temporary Principal passes
-						// authentication but is blocked by the M5.2 boundary before
-						// the protected mutation: the later mandatory gates
-						// (concrete production token verifier/bootstrap and
-						// transactional max_submissions consumption) are
-						// unavailable, so the boundary answers fail-closed.
+					case tc.opID == "createPreOnboardingRequest":
+						// In M5.5, CreatePreOnboardingRequest is frozen as fail-closed 503
 						wantStatus, wantCalls = http.StatusServiceUnavailable, 0
+					case tc.opID == "getPreOnboardingRequest",
+						tc.opID == "adminListPreOnboardingRequests",
+						tc.opID == "adminGetPreOnboardingRequest",
+						tc.opID == "adminApprovePreOnboardingRequest",
+						tc.opID == "adminRejectPreOnboardingRequest":
+						// M5.5 owns these operations: answered directly by pre-onboarding service boundary
+						wantCalls = 0
 					}
 					if rr.Code != wantStatus {
 						t.Fatalf("status = %d, want %d (body %s)", rr.Code, wantStatus, rr.Body.String())
@@ -518,14 +520,18 @@ func TestMixedAuthenticationConcurrencyIsolation(t *testing.T) {
 			headers: map[string]string{"Authorization": "Bearer " + tokHuman},
 		},
 		{
+			// M5.5 owns GET /v1/admin/pre-onboarding-requests: the AdminOIDC request
+			// succeeds through the pre-onboarding boundary without invoking the probe.
 			name: "AdminOIDC", method: "GET", path: "/v1/admin/pre-onboarding-requests",
-			wantStatus: http.StatusOK, wantCall: "AdminListPreOnboardingRequests",
+			wantStatus: http.StatusOK, wantCall: "",
 			headers: map[string]string{"Authorization": "Bearer " + tokAdmin},
 		},
 		{
+			// M5.5 owns GET /v1/pre-onboarding-requests/{id}: the RequestAccessToken request
+			// succeeds through the pre-onboarding boundary without invoking the probe.
 			name: "RequestAccessToken", method: "GET",
 			path:       "/v1/pre-onboarding-requests/por-0",
-			wantStatus: http.StatusOK, wantCall: "GetPreOnboardingRequest",
+			wantStatus: http.StatusOK, wantCall: "",
 			headers: map[string]string{"Authorization": "Bearer " + tokReq},
 		},
 		{

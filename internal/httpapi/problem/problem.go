@@ -23,6 +23,10 @@ const (
 	TypeScopeDenied            = "https://pki.example/errors/scope-denied"
 	TypePartnerNotAuthorized   = "https://pki.example/errors/partner-not-authorized"
 	TypeResourceNotFound       = "https://pki.example/errors/resource-not-found"
+	TypeResourceExpired        = "https://pki.example/errors/resource-expired"
+	TypeStateConflict          = "https://pki.example/errors/state-conflict"
+	TypeIdempotencyConflict    = "https://pki.example/errors/idempotency-conflict"
+	TypePreconditionFailed     = "https://pki.example/errors/precondition-failed"
 	TypeDependencyUnavailable  = "https://pki.example/errors/dependency-unavailable"
 	// TypeInternalError is infrastructure-only (server bug); it is not a
 	// contract machine code and must not be relied upon by clients.
@@ -180,6 +184,59 @@ func WritePartnerNotAuthorized(w http.ResponseWriter, r *http.Request) {
 		Title:     "Access denied",
 		Status:    http.StatusForbidden,
 		ErrorCode: "PARTNER_NOT_AUTHORIZED",
+	})
+}
+
+// WriteResourceNotFound emits 404 RESOURCE_NOT_FOUND.
+func WriteResourceNotFound(w http.ResponseWriter, r *http.Request) {
+	Write(w, r, Problem{
+		Type:      TypeResourceNotFound,
+		Title:     "Resource not found",
+		Status:    http.StatusNotFound,
+		ErrorCode: "RESOURCE_NOT_FOUND",
+	})
+}
+
+// WriteResourceExpired emits 410 RESOURCE_EXPIRED.
+func WriteResourceExpired(w http.ResponseWriter, r *http.Request) {
+	Write(w, r, Problem{
+		Type:      TypeResourceExpired,
+		Title:     "Resource expired",
+		Status:    http.StatusGone,
+		ErrorCode: "RESOURCE_EXPIRED",
+	})
+}
+
+// WritePreconditionFailed emits 412 PRECONDITION_FAILED.
+func WritePreconditionFailed(w http.ResponseWriter, r *http.Request, detail string) {
+	Write(w, r, Problem{
+		Type:      TypePreconditionFailed,
+		Title:     "Precondition failed",
+		Status:    http.StatusPreconditionFailed,
+		Detail:    detail,
+		ErrorCode: "PRECONDITION_FAILED",
+	})
+}
+
+// WriteStateConflict emits 409 STATE_CONFLICT.
+func WriteStateConflict(w http.ResponseWriter, r *http.Request, detail string) {
+	Write(w, r, Problem{
+		Type:      TypeStateConflict,
+		Title:     "State conflict",
+		Status:    http.StatusConflict,
+		Detail:    detail,
+		ErrorCode: "STATE_CONFLICT",
+	})
+}
+
+// WriteIdempotencyConflict emits 409 IDEMPOTENCY_CONFLICT.
+func WriteIdempotencyConflict(w http.ResponseWriter, r *http.Request, detail string) {
+	Write(w, r, Problem{
+		Type:      TypeIdempotencyConflict,
+		Title:     "Idempotency conflict",
+		Status:    http.StatusConflict,
+		Detail:    detail,
+		ErrorCode: "IDEMPOTENCY_CONFLICT",
 	})
 }
 

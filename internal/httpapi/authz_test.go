@@ -30,6 +30,7 @@ func newAuthzTestServer(t *testing.T, authzReg *authzruntime.Registry) (http.Han
 		// unavailable providers.
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -62,7 +63,7 @@ func TestConfirmedDeviceApprovalScope(t *testing.T) {
 			method:      "POST",
 			path:        "/v1/admin/pre-onboarding-requests/por-123/approve",
 			body:        `{"reason":"approved","expected_status":"PENDING_APPROVAL"}`,
-			headers:     map[string]string{"Content-Type": "application/json", "Idempotency-Key": validIdempotencyKey, "If-Match": `"4"`},
+			headers:     map[string]string{"Content-Type": "application/json", "Idempotency-Key": validIdempotencyKey, "If-Match": testR123ETag},
 			handlerName: "AdminApprovePreOnboardingRequest",
 			wantStatus:  http.StatusOK,
 		},
@@ -71,7 +72,7 @@ func TestConfirmedDeviceApprovalScope(t *testing.T) {
 			method:      "POST",
 			path:        "/v1/admin/pre-onboarding-requests/por-123/reject",
 			body:        `{"reason":"rejected","expected_status":"PENDING_APPROVAL"}`,
-			headers:     map[string]string{"Content-Type": "application/json", "Idempotency-Key": validIdempotencyKey, "If-Match": `"4"`},
+			headers:     map[string]string{"Content-Type": "application/json", "Idempotency-Key": validIdempotencyKey, "If-Match": testR123ETag},
 			handlerName: "AdminRejectPreOnboardingRequest",
 			wantStatus:  http.StatusOK,
 		},
@@ -102,8 +103,8 @@ func TestConfirmedDeviceApprovalScope(t *testing.T) {
 			if rr.Code != op.wantStatus {
 				t.Fatalf("status = %d, want %d, body: %s", rr.Code, op.wantStatus, rr.Body.String())
 			}
-			if p.count(op.handlerName) != 1 {
-				t.Fatalf("handler %s calls = %d, want 1", op.handlerName, p.count(op.handlerName))
+			if p.count(op.handlerName) != 0 {
+				t.Fatalf("handler %s calls = %d, want 0 (answered by M5.5 boundary)", op.handlerName, p.count(op.handlerName))
 			}
 		})
 

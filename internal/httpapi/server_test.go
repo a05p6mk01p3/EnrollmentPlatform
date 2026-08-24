@@ -3,12 +3,14 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	authpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/policy"
 	authruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/runtime"
@@ -17,6 +19,9 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	preonboardingapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/application"
+	preonboardingdomain "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/domain"
+	preonboardingruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
@@ -361,6 +366,56 @@ func testResourceOwnershipService(partnerSvc *partnerauth.Service) *resourceowne
 	return svc
 }
 
+var (
+	testStartTime  = time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	testR123Req, _ = preonboardingdomain.RestoreRequest(preonboardingdomain.ID("por-123"), "P1", preonboardingdomain.ClaimedDevice{Hostname: "host-123"}, preonboardingdomain.Agent{Platform: "windows", Version: "1.0"}, preonboardingdomain.StatePendingApproval, nil, testStartTime, testStartTime.Add(24*time.Hour), 4)
+	testR123ETag   = preonboardingdomain.ComputeETag(testR123Req, testStartTime)
+	testReq1Req, _ = preonboardingdomain.RestoreRequest(preonboardingdomain.ID("req-1"), "P1", preonboardingdomain.ClaimedDevice{Hostname: "host-req-1"}, preonboardingdomain.Agent{Platform: "windows", Version: "1.0"}, preonboardingdomain.StatePendingApproval, nil, testStartTime, testStartTime.Add(24*time.Hour), 4)
+	testReq1ETag   = preonboardingdomain.ComputeETag(testReq1Req, testStartTime)
+)
+
+func testPreOnboardingService() *preonboardingapp.Service {
+	rec := preonboardingruntime.NewMemoryAuditRecorder()
+	st := preonboardingruntime.NewMemoryStore(rec)
+	clk := preonboardingruntime.NewMockClock(testStartTime)
+	for i := 0; i <= 50; i++ {
+		req, _ := preonboardingdomain.NewRequest(preonboardingdomain.ID(fmt.Sprintf("por-%d", i)), "P1", preonboardingdomain.ClaimedDevice{Hostname: fmt.Sprintf("host-%d", i)}, preonboardingdomain.Agent{Platform: "windows", Version: "1.0"}, testStartTime, testStartTime.Add(24*time.Hour))
+		st.SeedRequest(req)
+	}
+	st.SeedRequest(testR123Req)
+	st.SeedRequest(testReq1Req)
+	reqA, _ := preonboardingdomain.NewRequest(preonboardingdomain.ID("por-A"), "P1", preonboardingdomain.ClaimedDevice{Hostname: "host-A"}, preonboardingdomain.Agent{Platform: "windows", Version: "1.0"}, testStartTime, testStartTime.Add(24*time.Hour))
+	st.SeedRequest(reqA)
+	reqB, _ := preonboardingdomain.NewRequest(preonboardingdomain.ID("por-B"), "P1", preonboardingdomain.ClaimedDevice{Hostname: "host-B"}, preonboardingdomain.Agent{Platform: "windows", Version: "1.0"}, testStartTime, testStartTime.Add(24*time.Hour))
+	st.SeedRequest(reqB)
+
+	auth := preonboardingruntime.NewMemoryPartnerAuthorityChecker()
+	for _, sub := range []string{
+		"test-subject-admin",
+		"test-subject-admin-oidc",
+		"tok-admin-oidc",
+		"admin-allow-por",
+		"admin-456",
+		"admin-subject",
+		"",
+	} {
+		for _, iss := range []string{"test-issuer", "https://issuer.example/admin", "https://pki.example/admin-issuer", ""} {
+			auth.GrantPartnerAuthority(preonboardingapp.AdminPrincipal{Issuer: iss, Subject: sub}, "P1")
+			auth.GrantPartnerAuthority(preonboardingapp.AdminPrincipal{Issuer: iss, Subject: sub}, "P2")
+		}
+	}
+	elig := preonboardingruntime.NewMemoryPartnerEligibilityChecker()
+	svc, _ := preonboardingapp.NewService(preonboardingapp.ServiceConfig{
+		UOWManager:         st,
+		Clock:              clk,
+		DeviceAllocator:    preonboardingruntime.DefaultDeviceAllocator{},
+		PartnerAuth:        auth,
+		PartnerEligibility: elig,
+		RetentionPolicy:    preonboardingapp.StaticIdempotencyRetentionPolicy{Duration: time.Hour},
+	})
+	return svc
+}
+
 func newTestHandler(t testing.TB) (http.Handler, *probeSSI) {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
@@ -371,6 +426,7 @@ func newTestHandler(t testing.TB) (http.Handler, *probeSSI) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(testResourceOwnershipService(partnerSvc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

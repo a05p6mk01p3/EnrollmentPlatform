@@ -16,6 +16,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	preonboardingapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/application"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
@@ -144,6 +145,7 @@ func newAuthTestHandler(t *testing.T, reg *authruntime.Registry, source authrunt
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(testResourceOwnershipService(partnerSvc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -373,11 +375,11 @@ func TestTemporaryPrincipalRemainsSeparate(t *testing.T) {
 		"Idempotency-Key": validIdempotencyKey,
 		"Authorization":   "Bearer " + tokHuman,
 	})
-	if rr2.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201 (body %s)", rr2.Code, rr2.Body.String())
+	if rr2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", rr2.Code, rr2.Body.String())
 	}
-	if p.count("CreatePreOnboardingRequest") != 1 {
-		t.Fatalf("CreatePreOnboardingRequest calls = %d, want 1", p.count("CreatePreOnboardingRequest"))
+	if p.count("CreatePreOnboardingRequest") != 0 {
+		t.Fatalf("CreatePreOnboardingRequest calls = %d, want 0 (answered by M5.5 boundary)", p.count("CreatePreOnboardingRequest"))
 	}
 }
 
@@ -430,8 +432,8 @@ func TestORSemanticsRuntime(t *testing.T) {
 			t.Fatalf("token %q: status = %d, want 200 (body %s)", tok, rr.Code, rr.Body.String())
 		}
 	}
-	if p.count("GetPreOnboardingRequest") != 2 {
-		t.Fatalf("GetPreOnboardingRequest calls = %d, want 2", p.count("GetPreOnboardingRequest"))
+	if p.count("GetPreOnboardingRequest") != 0 {
+		t.Fatalf("GetPreOnboardingRequest calls = %d, want 0 (answered by M5.5 boundary)", p.count("GetPreOnboardingRequest"))
 	}
 }
 
@@ -869,6 +871,7 @@ func TestProductionStartupRequiresCompleteAuthenticationComposition(t *testing.T
 		httpapi.WithDeviceMTLSSource(completeTestDeviceSource(nil)),
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
+		httpapi.WithPreOnboardingService(preonboardingapp.NewUnavailableService()),
 	); err != nil {
 		t.Fatalf("NewServer with a complete composition should succeed: %v", err)
 	}
@@ -1041,7 +1044,7 @@ func TestM3RegistryMultiBearerKindRoutesReachM3(t *testing.T) {
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rr2.Code, rr2.Body.String())
 	}
-	if p.count("GetPreOnboardingRequest") != 1 {
-		t.Fatal("GetPreOnboardingRequest was not reached")
+	if p.count("GetPreOnboardingRequest") != 0 {
+		t.Fatal("GetPreOnboardingRequest must be answered by M5.5 boundary")
 	}
 }

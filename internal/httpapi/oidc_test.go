@@ -95,6 +95,7 @@ func oidcHandler(t *testing.T, humanAuth, adminAuth authruntime.Authenticator) (
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(testResourceOwnershipService(partnerSvc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -138,7 +139,7 @@ func TestOIDCHTTPCredentialDispatch(t *testing.T) {
 	h, p := oidcHandler(t, humanAuth, adminAuth)
 
 	humanTok := humanKey.sign(t, humanIss, "human-subject", humanAud)
-	adminTok := adminKey.sign(t, adminIss, "admin-subject", adminAud)
+	adminTok := adminKey.sign(t, adminIss, "test-subject-admin", adminAud)
 
 	t.Run("human on human route", func(t *testing.T) {
 		rr := doAuth(t, h, "GET", "/v1/me/authorizations", "", map[string]string{"Authorization": "Bearer " + humanTok})
@@ -165,8 +166,8 @@ func TestOIDCHTTPCredentialDispatch(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
 		}
-		if p.count("AdminListPreOnboardingRequests") != 1 {
-			t.Fatal("AdminListPreOnboardingRequests was not reached")
+		if p.count("AdminListPreOnboardingRequests") != 0 {
+			t.Fatal("AdminListPreOnboardingRequests must be answered by the M5.5 boundary, not the inner handler")
 		}
 	})
 

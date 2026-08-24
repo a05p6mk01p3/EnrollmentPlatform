@@ -78,8 +78,8 @@ func TestRequestAccessResourceBinding(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
 	}
-	if p.count("GetPreOnboardingRequest") != 1 {
-		t.Fatal("GetPreOnboardingRequest was not reached")
+	if p.count("GetPreOnboardingRequest") != 0 {
+		t.Fatal("GetPreOnboardingRequest must be answered by M5.5 boundary")
 	}
 
 	// Bound resource A used on URL B => 401 (no resource oracle beyond 401).

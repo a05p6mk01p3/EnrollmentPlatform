@@ -13,6 +13,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	preonboardingapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/application"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
@@ -65,6 +66,7 @@ func TestCompositionBuildWiresIntoServer(t *testing.T) {
 		// as the fail-closed unavailable providers.
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
+		httpapi.WithPreOnboardingService(preonboardingapp.NewUnavailableService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

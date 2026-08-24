@@ -13,6 +13,7 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	preonboardingapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/application"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
@@ -33,16 +34,19 @@ func run() error {
 	// middleware + generated router). No listener is started and no business
 	// handler is registered in this milestone.
 	//
-	// M5.2 partner authorization and M5.3 resource ownership are explicitly
-	// wired as unavailable, fail-closed providers while no real providers exist:
-	// no request can resolve partner authorization or ownership, and no
-	// protected mutation or read can proceed.
+	// M5.2 partner authorization, M5.3 resource ownership, and M5.5 pre-onboarding
+	// are explicitly wired as unavailable, fail-closed providers while no real
+	// durable transactional providers exist: no request can resolve partner
+	// authorization, ownership, or pre-onboarding mutations, and all protected
+	// operations fail closed.
 	partnerSvc := partnerauth.NewUnavailableService()
 	ownershipSvc := resourceownership.NewUnavailableService(partnerSvc)
+	preonboardSvc := preonboardingapp.NewUnavailableService()
 
 	server, err := httpapi.NewServer(cfg,
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(ownershipSvc),
+		httpapi.WithPreOnboardingService(preonboardSvc),
 	)
 	if err != nil {
 		return err

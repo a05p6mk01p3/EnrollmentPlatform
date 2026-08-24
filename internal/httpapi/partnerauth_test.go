@@ -60,6 +60,7 @@ func newPartnerTestHandler(t *testing.T, svc *partnerauth.Service) (http.Handler
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -182,11 +183,12 @@ func TestPartnerAuthHumanSelectionAllow(t *testing.T) {
 		"Idempotency-Key": validIdempotencyKey,
 		"Authorization":   humanBearer(),
 	})
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201 (body %s)", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", rr.Code, rr.Body.String())
 	}
-	if p.count("CreatePreOnboardingRequest") != 1 {
-		t.Fatalf("protected mutation calls = %d, want 1", p.count("CreatePreOnboardingRequest"))
+	assertProblem(t, rr, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE")
+	if p.count("CreatePreOnboardingRequest") != 0 {
+		t.Fatalf("protected mutation calls = %d, want 0", p.count("CreatePreOnboardingRequest"))
 	}
 }
 
@@ -257,9 +259,10 @@ func TestPartnerAuthFreshnessAcrossRequests(t *testing.T) {
 		"Authorization":   humanBearer(),
 	}
 	rr := doAuth(t, h, "POST", "/v1/pre-onboarding-requests", preOnboardJSON("P1"), headers)
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("request A status = %d, want 201 (body %s)", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("request A status = %d, want 503 (body %s)", rr.Code, rr.Body.String())
 	}
+	assertProblem(t, rr, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE")
 
 	mu.Lock()
 	state = partnerauth.HumanAuthorizations{PrincipalID: "principal-123", Partners: []partnerauth.PartnerAuthorization{{PartnerID: "P2", DisplayName: "B", Scopes: []string{"device:preonboard"}}}}
@@ -373,6 +376,7 @@ func TestPartnerAuthNilServiceRejected(t *testing.T) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(nil),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerauth.NewUnavailableService())),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	); err == nil {
 		t.Fatal("NewServer with a nil partner authorization service must fail")
 	}
@@ -390,6 +394,7 @@ func TestPartnerAuthZeroValueServiceRejected(t *testing.T) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(&partnerauth.Service{}),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerauth.NewUnavailableService())),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	); err == nil {
 		t.Fatal("NewServer with a zero-value partner authorization service must fail construction")
 	}
@@ -408,6 +413,7 @@ func TestPartnerAuthUnavailableServiceValidStartup(t *testing.T) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer with the explicitly unavailable M5.2 service must succeed: %v", err)
@@ -468,6 +474,7 @@ func TestPartnerAuthMandatoryCompositionDeniesWithoutDelegation(t *testing.T) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -519,6 +526,7 @@ func TestPartnerAuthTrustBundleSkipsPartnerResolution(t *testing.T) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -637,6 +645,7 @@ func TestPartnerAuthConcurrentRequestIsolation(t *testing.T) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(svc),
 		httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(svc)),
+		httpapi.WithPreOnboardingService(testPreOnboardingService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -651,8 +660,8 @@ func TestPartnerAuthConcurrentRequestIsolation(t *testing.T) {
 		wantCode int
 	}
 	cases := []want{
-		{"tok-A", "P1", http.StatusCreated},
-		{"tok-B", "P2", http.StatusCreated},
+		{"tok-A", "P1", http.StatusServiceUnavailable},
+		{"tok-B", "P2", http.StatusServiceUnavailable},
 		{"tok-A", "P2", http.StatusForbidden},
 		{"tok-B", "P1", http.StatusForbidden},
 	}

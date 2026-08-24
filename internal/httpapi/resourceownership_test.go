@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	authpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/policy"
 	authruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/runtime"
@@ -13,6 +14,9 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
+	preonboardingapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/application"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/domain"
+	preonboardingruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/resourceownership"
 )
 
@@ -97,6 +101,35 @@ func (c *customPreOnboardProbeSSI) GetPreOnboardingRequest(ctx context.Context, 
 	}, nil
 }
 
+func (c *customPreOnboardProbeSSI) OverrideGetPreOnboardingRequest(ctx context.Context, request openapi.GetPreOnboardingRequestRequestObject) (openapi.GetPreOnboardingRequestResponseObject, bool, error) {
+	if c.getFn != nil {
+		resp, err := c.GetPreOnboardingRequest(ctx, request)
+		return resp, true, err
+	}
+	return nil, false, nil
+}
+
+func testPreOnboardingServiceWithRequests(requests ...*domain.PreOnboardingRequest) *preonboardingapp.Service {
+	rec := preonboardingruntime.NewMemoryAuditRecorder()
+	st := preonboardingruntime.NewMemoryStore(rec)
+	now := time.Now()
+	clk := preonboardingruntime.NewMockClock(now)
+	for _, req := range requests {
+		st.SeedRequest(req)
+	}
+	auth := preonboardingruntime.NewMemoryPartnerAuthorityChecker()
+	elig := preonboardingruntime.NewMemoryPartnerEligibilityChecker()
+	svc, _ := preonboardingapp.NewService(preonboardingapp.ServiceConfig{
+		UOWManager:         st,
+		Clock:              clk,
+		DeviceAllocator:    preonboardingruntime.DefaultDeviceAllocator{},
+		PartnerAuth:        auth,
+		PartnerEligibility: elig,
+		RetentionPolicy:    preonboardingapp.StaticIdempotencyRetentionPolicy{Duration: time.Hour},
+	})
+	return svc
+}
+
 func newOwnershipTestServer(t *testing.T, partnerSvc *partnerauth.Service, ownershipSvc *resourceownership.Service, customReg *authruntime.Registry, ssi openapi.StrictServerInterface) http.Handler {
 	t.Helper()
 	cfg := config.Config{GeneralJSONDefaultBytes: 262144, AbsoluteRequestBodyBytes: 4 << 20}
@@ -104,12 +137,22 @@ func newOwnershipTestServer(t *testing.T, partnerSvc *partnerauth.Service, owner
 	if customReg != nil {
 		reg = customReg
 	}
+	now := time.Now()
+	req1, _ := domain.NewRequest("por-1", "P1", domain.ClaimedDevice{Hostname: "h1"}, domain.Agent{}, now, now.Add(time.Hour))
+	req2, _ := domain.NewRequest("por-2", "P2", domain.ClaimedDevice{Hostname: "h2"}, domain.Agent{}, now, now.Add(time.Hour))
+	req3, _ := domain.NewRequest("por-3", "P1", domain.ClaimedDevice{Hostname: "h3"}, domain.Agent{}, now, now.Add(time.Hour))
+	exp1, _ := domain.NewRequest("por-expired-p1", "P1", domain.ClaimedDevice{Hostname: "h4"}, domain.Agent{}, now.Add(-time.Hour), now.Add(-10*time.Minute))
+	exp2, _ := domain.NewRequest("por-expired-p2", "P2", domain.ClaimedDevice{Hostname: "h5"}, domain.Agent{}, now.Add(-time.Hour), now.Add(-10*time.Minute))
+	expPtr, _ := domain.NewRequest("por-expired-ptr", "P1", domain.ClaimedDevice{Hostname: "h6"}, domain.Agent{}, now.Add(-time.Hour), now.Add(-10*time.Minute))
+	preonboardSvc := testPreOnboardingServiceWithRequests(req1, req2, req3, exp1, exp2, expPtr)
+
 	srv, err := httpapi.NewServer(cfg,
 		httpapi.WithAuthnRegistry(reg),
 		httpapi.WithDeviceMTLSSource(testDeviceSource()),
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(ownershipSvc),
+		httpapi.WithPreOnboardingService(preonboardSvc),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -156,8 +199,8 @@ func TestHumanSamePartnerVisibility(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
 	}
-	if p.count("GetPreOnboardingRequest") != 1 {
-		t.Fatalf("protected read count = %d, want 1", p.count("GetPreOnboardingRequest"))
+	if p.count("GetPreOnboardingRequest") != 0 {
+		t.Fatalf("protected read count = %d, want 0 (answered by M5.5 boundary)", p.count("GetPreOnboardingRequest"))
 	}
 	body := jsonBody(t, rr)
 	if body["pre_onboarding_request_id"] != "por-1" {
@@ -605,8 +648,8 @@ func TestRequestAccessTokenExactResourceAccess(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
 	}
-	if p.count("GetPreOnboardingRequest") != 1 {
-		t.Fatalf("protected read count = %d, want 1", p.count("GetPreOnboardingRequest"))
+	if p.count("GetPreOnboardingRequest") != 0 {
+		t.Fatalf("protected read count = %d, want 0 (answered by M5.5 boundary)", p.count("GetPreOnboardingRequest"))
 	}
 	if partnerSpy.count() != 0 {
 		t.Fatalf("human partner resolver called %d times, want 0 on RequestAccessToken branch", partnerSpy.count())
@@ -1118,6 +1161,7 @@ func TestMandatoryHandlerComposition(t *testing.T) {
 		httpapi.WithAuthzRegistry(testAuthzRegistry()),
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(ownershipSvc),
+		httpapi.WithPreOnboardingService(preonboardingapp.NewUnavailableService()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -1275,6 +1319,7 @@ func TestResourceOwnershipStartupIntegrity(t *testing.T) {
 			httpapi.WithAuthzRegistry(testAuthzRegistry()),
 			httpapi.WithPartnerAuthService(partnerSvc),
 			httpapi.WithResourceOwnershipService(nil),
+			httpapi.WithPreOnboardingService(preonboardingapp.NewUnavailableService()),
 		); err == nil {
 			t.Fatal("NewServer with nil resource ownership service must fail")
 		}
@@ -1287,6 +1332,7 @@ func TestResourceOwnershipStartupIntegrity(t *testing.T) {
 			httpapi.WithAuthzRegistry(testAuthzRegistry()),
 			httpapi.WithPartnerAuthService(partnerSvc),
 			httpapi.WithResourceOwnershipService(&resourceownership.Service{}),
+			httpapi.WithPreOnboardingService(preonboardingapp.NewUnavailableService()),
 		); err == nil {
 			t.Fatal("NewServer with zero-value &resourceownership.Service{} must fail")
 		}
@@ -1303,6 +1349,7 @@ func TestResourceOwnershipStartupIntegrity(t *testing.T) {
 			httpapi.WithAuthzRegistry(testAuthzRegistry()),
 			httpapi.WithPartnerAuthService(partnerA),
 			httpapi.WithResourceOwnershipService(ownershipSvc),
+			httpapi.WithPreOnboardingService(preonboardingapp.NewUnavailableService()),
 		); err == nil {
 			t.Fatal("NewServer with different partnerauth.Service instances between partner auth and resource ownership must fail")
 		}
@@ -1316,6 +1363,7 @@ func TestResourceOwnershipStartupIntegrity(t *testing.T) {
 			httpapi.WithAuthzRegistry(testAuthzRegistry()),
 			httpapi.WithPartnerAuthService(partnerSvc),
 			httpapi.WithResourceOwnershipService(resourceownership.NewUnavailableService(partnerSvc)),
+			httpapi.WithPreOnboardingService(preonboardingapp.NewUnavailableService()),
 		)
 		if err != nil {
 			t.Fatalf("NewServer with explicit unavailable service must succeed: %v", err)

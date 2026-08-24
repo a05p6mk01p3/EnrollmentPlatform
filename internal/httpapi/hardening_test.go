@@ -174,7 +174,7 @@ func TestIfMatchPatternEnforced(t *testing.T) {
 	valid := map[string]string{
 		"Content-Type":    "application/json",
 		"Idempotency-Key": validIdempotencyKey,
-		"If-Match":        `"4"`,
+		"If-Match":        testReq1ETag,
 	}
 	body := `{"reason":"approved","expected_status":"PENDING_APPROVAL"}`
 
@@ -183,8 +183,8 @@ func TestIfMatchPatternEnforced(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("valid If-Match: status = %d, want 200 (body %s)", rr.Code, rr.Body.String())
 	}
-	if p.count("AdminApprovePreOnboardingRequest") != 1 {
-		t.Fatal("valid request did not reach the handler")
+	if p.count("AdminApprovePreOnboardingRequest") != 0 {
+		t.Fatal("AdminApprovePreOnboardingRequest must be answered by M5.5 boundary")
 	}
 
 	h2, p2 := newTestHandler(t)
