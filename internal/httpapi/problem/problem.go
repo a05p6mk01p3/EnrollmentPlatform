@@ -16,18 +16,19 @@ import (
 
 // Type URIs follow the contract examples (OpenAPI v0.1.1 components/responses).
 const (
-	TypeInvalidRequest         = "https://pki.example/errors/invalid-request"
-	TypePayloadTooLarge        = "https://pki.example/errors/payload-too-large"
-	TypeUnsupportedMediaType   = "https://pki.example/errors/unsupported-media-type"
-	TypeAuthenticationRequired = "https://pki.example/errors/authentication-required"
-	TypeScopeDenied            = "https://pki.example/errors/scope-denied"
-	TypePartnerNotAuthorized   = "https://pki.example/errors/partner-not-authorized"
-	TypeResourceNotFound       = "https://pki.example/errors/resource-not-found"
-	TypeResourceExpired        = "https://pki.example/errors/resource-expired"
-	TypeStateConflict          = "https://pki.example/errors/state-conflict"
-	TypeIdempotencyConflict    = "https://pki.example/errors/idempotency-conflict"
-	TypePreconditionFailed     = "https://pki.example/errors/precondition-failed"
-	TypeDependencyUnavailable  = "https://pki.example/errors/dependency-unavailable"
+	TypeInvalidRequest               = "https://pki.example/errors/invalid-request"
+	TypePayloadTooLarge              = "https://pki.example/errors/payload-too-large"
+	TypeUnsupportedMediaType         = "https://pki.example/errors/unsupported-media-type"
+	TypeAuthenticationRequired       = "https://pki.example/errors/authentication-required"
+	TypeScopeDenied                  = "https://pki.example/errors/scope-denied"
+	TypePartnerNotAuthorized         = "https://pki.example/errors/partner-not-authorized"
+	TypeResourceNotFound             = "https://pki.example/errors/resource-not-found"
+	TypeResourceExpired              = "https://pki.example/errors/resource-expired"
+	TypeStateConflict                = "https://pki.example/errors/state-conflict"
+	TypeIdempotencyConflict          = "https://pki.example/errors/idempotency-conflict"
+	TypeIdempotencyReplayUnavailable = "https://pki.example/errors/idempotency-replay-unavailable"
+	TypePreconditionFailed           = "https://pki.example/errors/precondition-failed"
+	TypeDependencyUnavailable        = "https://pki.example/errors/dependency-unavailable"
 	// TypeInternalError is infrastructure-only (server bug); it is not a
 	// contract machine code and must not be relied upon by clients.
 	TypeInternalError = "https://pki.example/errors/internal-error"

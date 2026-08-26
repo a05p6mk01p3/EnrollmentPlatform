@@ -52,12 +52,13 @@ func (UnavailablePartnerEligibilityChecker) Validate() error { return nil }
 // operation fails closed with ErrDependencyUnavailable.
 func NewUnavailableService() *Service {
 	s, err := NewService(ServiceConfig{
-		UOWManager:         UnavailableUnitOfWorkManager{},
-		Clock:              SystemClock{},
-		DeviceAllocator:    UnavailableDeviceAllocator{},
-		PartnerAuth:        UnavailablePartnerAuthorityChecker{},
-		PartnerEligibility: UnavailablePartnerEligibilityChecker{},
-		RetentionPolicy:    StaticIdempotencyRetentionPolicy{Duration: time.Hour},
+		UOWManager:                 UnavailableUnitOfWorkManager{},
+		Clock:                      SystemClock{},
+		DeviceAllocator:            UnavailableDeviceAllocator{},
+		PartnerAuth:                UnavailablePartnerAuthorityChecker{},
+		PartnerEligibility:         UnavailablePartnerEligibilityChecker{},
+		RetentionPolicy:            StaticIdempotencyRetentionPolicy{Duration: time.Hour},
+		RequestAccessTokenLifetime: StaticRequestAccessTokenLifetime{Duration: time.Hour},
 	})
 	if err != nil {
 		panic(err)

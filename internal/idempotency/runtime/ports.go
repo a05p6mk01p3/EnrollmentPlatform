@@ -142,13 +142,9 @@ type Clock interface {
 // RecoverSecretRequest carries the inputs for protected secret recovery. The
 // associated data is opaque caller-provided bytes.
 //
-// M5.4 deliberately does NOT freeze the final operation-specific Associated
-// Data schema. Protocol §6.4 has an unresolved controlled-source tension: the
-// Replay Capsule applies to REQUEST_ACCESS_TOKEN created by pre-onboarding,
-// while its Associated Data language includes enrollment_id even though no
-// enrollment exists at pre-onboarding creation time. This milestone does not
-// resolve or reinterpret that tension; operation-specific AAD construction is
-// deferred to a later milestone with an explicit decision.
+// The generic M5.4 kernel deliberately treats Associated Data as opaque and
+// does not own operation-specific construction. CR-M5.6-001 defines the
+// originator-specific AAD model outside this generic kernel.
 //
 // It deliberately carries NO time field: recovery expiry is decided with the
 // Service's server-controlled clock, never with client-supplied time.

@@ -2,9 +2,12 @@ package application
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"time"
 
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/capability"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/idempotency/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/domain"
 )
@@ -51,10 +54,47 @@ type ListResult struct {
 // ResultStore is the transaction-bound port for persisting and retrieving
 // committed application result snapshots for idempotent replay.
 type ResultStore interface {
+	SaveCreateResult(ctx context.Context, loc runtime.ResultLocator, res PreOnboardingCreateResultSnapshot) error
+	GetCreateResult(ctx context.Context, loc runtime.ResultLocator) (PreOnboardingCreateResultSnapshot, bool, error)
 	SaveApprovalResult(ctx context.Context, loc runtime.ResultLocator, res ApprovalResultSnapshot) error
 	GetApprovalResult(ctx context.Context, loc runtime.ResultLocator) (ApprovalResultSnapshot, bool, error)
 	SaveRejectionResult(ctx context.Context, loc runtime.ResultLocator, res RejectionResultSnapshot) error
 	GetRejectionResult(ctx context.Context, loc runtime.ResultLocator) (RejectionResultSnapshot, bool, error)
+}
+
+// RequestAccessWriter is the write-side complement to capability.Store. It is
+// transaction-bound; authentication remains strictly read-only.
+type RequestAccessWriter interface {
+	CreateRequestAccess(ctx context.Context, key capability.VerifierKey, rec capability.RequestAccessRecord) error
+}
+
+// IDGenerator and TokenGenerator are pure generation seams. Their output is
+// transient until the enclosing UoW commits it.
+type IDGenerator interface {
+	NewPreOnboardingRequestID(context.Context) (string, error)
+}
+type TokenGenerator interface {
+	NewRequestAccessToken(context.Context) (string, error)
+}
+
+type CryptoIDGenerator struct{}
+
+func (CryptoIDGenerator) NewPreOnboardingRequestID(context.Context) (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "por-" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+type CryptoTokenGenerator struct{}
+
+func (CryptoTokenGenerator) NewRequestAccessToken(context.Context) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // DeviceAllocator is the provider-neutral logical device identifier generator.
@@ -92,6 +132,20 @@ type IdempotencyRetentionPolicy interface {
 	ReservationDuration() time.Duration
 }
 
+// RequestAccessTokenLifetime is deliberately distinct from idempotency retention.
+type RequestAccessTokenLifetime interface{ RequestAccessTokenLifetime() time.Duration }
+type StaticRequestAccessTokenLifetime struct{ Duration time.Duration }
+
+func (p StaticRequestAccessTokenLifetime) RequestAccessTokenLifetime() time.Duration {
+	return p.Duration
+}
+func (p StaticRequestAccessTokenLifetime) Validate() error {
+	if p.Duration <= 0 {
+		return errors.New("application: request access token lifetime must be positive")
+	}
+	return nil
+}
+
 // StaticIdempotencyRetentionPolicy is a simple duration-based retention policy.
 type StaticIdempotencyRetentionPolicy struct {
 	Duration time.Duration
@@ -108,6 +162,31 @@ func (p StaticIdempotencyRetentionPolicy) Validate() error {
 	return nil
 }
 
+// ReplayCapsuleRetentionPolicy provides the lifetime of replay capsules.
+type ReplayCapsuleRetentionPolicy interface {
+	ReplayCapsuleLifetime() time.Duration
+}
+
+type StaticReplayCapsuleRetentionPolicy struct {
+	Duration time.Duration
+}
+
+func (p StaticReplayCapsuleRetentionPolicy) ReplayCapsuleLifetime() time.Duration {
+	return p.Duration
+}
+
+func (p StaticReplayCapsuleRetentionPolicy) Validate() error {
+	if p.Duration <= 0 {
+		return errors.New("application: replay capsule retention policy duration must be positive")
+	}
+	return nil
+}
+
+type TemporaryPrincipalStore interface {
+	Get(ctx context.Context, id string) (*domain.TemporaryPrincipal, bool, error)
+	Save(ctx context.Context, tp *domain.TemporaryPrincipal) error
+}
+
 // UnitOfWork coordinates idempotency reservation, aggregate mutation,
 // result snapshot persistence, and audit event staging inside an atomic transaction.
 type UnitOfWork interface {
@@ -115,6 +194,8 @@ type UnitOfWork interface {
 	ResultStore() ResultStore
 	AuditWriter() AuditWriter
 	IdempotencyStore() runtime.Store
+	RequestAccessWriter() RequestAccessWriter
+	TemporaryPrincipalStore() TemporaryPrincipalStore
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
 }

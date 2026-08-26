@@ -6,6 +6,18 @@ import (
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/domain"
 )
 
+// PreOnboardingCreateResultSnapshot is the immutable, non-secret portion of
+// the originating 201 response. The token is recoverable only from its capsule.
+type PreOnboardingCreateResultSnapshot struct {
+	PreOnboardingRequestID string
+	PartnerID              string
+	ExpiresAt              time.Time
+	Status                 string
+	ETag                   string
+	Location               string
+	CommittedAt            time.Time
+}
+
 // ApprovalResultSnapshot captures the immutable outcome of a successful approval.
 type ApprovalResultSnapshot struct {
 	PreOnboardingRequestID string    `json:"pre_onboarding_request_id"`

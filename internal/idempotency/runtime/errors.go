@@ -143,5 +143,5 @@ func newRecoveryError(reason RecoveryReason, cause error) error {
 // wrapOpenError wraps a protector Open failure as a distinguishable recovery
 // error that preserves the cause for errors.Is/errors.As chains.
 func wrapOpenError(cause error) error {
-	return &RecoveryError{Reason: RecoveryReasonOpenFailed, Cause: fmt.Errorf("%w: %v", ErrEnvelopeOpenFailed, cause)}
+	return &RecoveryError{Reason: RecoveryReasonOpenFailed, Cause: fmt.Errorf("%w: %w", ErrEnvelopeOpenFailed, cause)}
 }

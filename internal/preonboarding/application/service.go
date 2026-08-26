@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/capability"
 	authpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authn/policy"
 	idempotencyruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/idempotency/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/domain"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/replaycapsule"
 )
 
 // failClosedNoSecretProtector satisfies M5.4 Protector for non-secret operations.
@@ -42,22 +44,28 @@ func isNilLike(v any) bool {
 
 // Service is the M5.5 Pre-Onboarding lifecycle application service.
 type Service struct {
-	uowManager         UnitOfWorkManager
-	clock              Clock
-	deviceAllocator    DeviceAllocator
-	partnerAuth        PartnerAuthorityChecker
-	partnerEligibility PartnerEligibilityChecker
-	retentionPolicy    IdempotencyRetentionPolicy
+	uowManager          UnitOfWorkManager
+	clock               Clock
+	deviceAllocator     DeviceAllocator
+	partnerAuth         PartnerAuthorityChecker
+	partnerEligibility  PartnerEligibilityChecker
+	retentionPolicy     IdempotencyRetentionPolicy
+	replayCapsulePolicy ReplayCapsuleRetentionPolicy
+	tokenLifetime       RequestAccessTokenLifetime
+	create              *CreateDependencies
 }
 
 // ServiceConfig carries mandatory dependencies for constructing a Service.
 type ServiceConfig struct {
-	UOWManager         UnitOfWorkManager
-	Clock              Clock
-	DeviceAllocator    DeviceAllocator
-	PartnerAuth        PartnerAuthorityChecker
-	PartnerEligibility PartnerEligibilityChecker
-	RetentionPolicy    IdempotencyRetentionPolicy
+	UOWManager                 UnitOfWorkManager
+	Clock                      Clock
+	DeviceAllocator            DeviceAllocator
+	PartnerAuth                PartnerAuthorityChecker
+	PartnerEligibility         PartnerEligibilityChecker
+	RetentionPolicy            IdempotencyRetentionPolicy
+	ReplayCapsulePolicy        ReplayCapsuleRetentionPolicy
+	RequestAccessTokenLifetime RequestAccessTokenLifetime
+	Create                     *CreateDependencies
 }
 
 type validator interface {
@@ -80,12 +88,15 @@ func validateDependency(name string, dep any) error {
 // are mandatory and fail closed if missing, typed-nil, or structurally invalid.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	s := &Service{
-		uowManager:         cfg.UOWManager,
-		clock:              cfg.Clock,
-		deviceAllocator:    cfg.DeviceAllocator,
-		partnerAuth:        cfg.PartnerAuth,
-		partnerEligibility: cfg.PartnerEligibility,
-		retentionPolicy:    cfg.RetentionPolicy,
+		uowManager:          cfg.UOWManager,
+		clock:               cfg.Clock,
+		deviceAllocator:     cfg.DeviceAllocator,
+		partnerAuth:         cfg.PartnerAuth,
+		partnerEligibility:  cfg.PartnerEligibility,
+		retentionPolicy:     cfg.RetentionPolicy,
+		replayCapsulePolicy: cfg.ReplayCapsulePolicy,
+		tokenLifetime:       cfg.RequestAccessTokenLifetime,
+		create:              cfg.Create,
 	}
 	if err := s.Validate(); err != nil {
 		return nil, err
@@ -119,6 +130,32 @@ func (s *Service) Validate() error {
 	if s.retentionPolicy.ReservationDuration() <= 0 {
 		return errors.New("application: retention policy must have positive reservation duration")
 	}
+	if !isNilLike(s.create) {
+		if err := validateDependency("create.id generator", s.create.IDGenerator); err != nil {
+			return err
+		}
+		if err := validateDependency("create.token generator", s.create.TokenGenerator); err != nil {
+			return err
+		}
+		if err := validateDependency("create.verifier", s.create.Verifier); err != nil {
+			return err
+		}
+		if err := validateDependency("create.protector", s.create.Protector); err != nil {
+			return err
+		}
+		if err := validateDependency("token lifetime", s.tokenLifetime); err != nil {
+			return err
+		}
+		if s.tokenLifetime.RequestAccessTokenLifetime() <= 0 {
+			return errors.New("application: token lifetime must have positive lifetime")
+		}
+		if err := validateDependency("replay capsule policy", s.replayCapsulePolicy); err != nil {
+			return err
+		}
+		if s.replayCapsulePolicy.ReplayCapsuleLifetime() <= 0 {
+			return errors.New("application: replay capsule policy must have positive replay capsule lifetime")
+		}
+	}
 	return nil
 }
 
@@ -137,6 +174,192 @@ type CreateCommand struct {
 // persistent ID allocation, persistence, or audit event generation occurs.
 func (s *Service) CreatePreOnboardingRequest(ctx context.Context, cmd CreateCommand) (*domain.PreOnboardingRequest, error) {
 	return nil, ErrDependencyUnavailable
+}
+
+// CreateOriginatorCommand is the authenticated, already-authorized M5.6 input.
+type CreateOriginatorCommand struct {
+	CreateCommand
+	CredentialKind    authpolicy.CredentialKind
+	CredentialBinding string
+	IdempotencyKey    string
+	CorrelationID     string
+}
+type CreateOriginatorResult struct {
+	Snapshot           PreOnboardingCreateResultSnapshot
+	RequestAccessToken string
+	Replay             bool
+}
+
+func (s *Service) CreateOriginator(ctx context.Context, cmd CreateOriginatorCommand) (CreateOriginatorResult, error) {
+	if err := s.Validate(); err != nil || s.tokenLifetime == nil || s.create == nil || s.create.IDGenerator == nil || s.create.TokenGenerator == nil || s.create.Verifier == nil || s.create.Protector == nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	if cmd.PartnerID == "" || cmd.CredentialBinding == "" || cmd.IdempotencyKey == "" {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	cred, err := idempotencyruntime.NewCredentialScope(cmd.CredentialKind, cmd.CredentialBinding)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	key, err := idempotencyruntime.NewIdempotencyKey(cmd.IdempotencyKey)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	scope, err := idempotencyruntime.NewEffectiveScope(cred, "POST", "/v1/pre-onboarding-requests", key)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	fp, err := ComputeCreateFingerprint(cmd)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	now := s.clock.Now()
+	uow, err := s.uowManager.Begin(ctx)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	defer uow.Rollback(ctx)
+
+	// BEFORE mutation ownership / as a side-effect-free authorization gate:
+	if cmd.CredentialKind == authpolicy.CredentialKindTemporaryPrincipalToken {
+		tpStore := uow.TemporaryPrincipalStore()
+		tpRecord, found, err := tpStore.Get(ctx, cmd.CredentialBinding)
+		if err != nil {
+			return CreateOriginatorResult{}, ErrDependencyUnavailable
+		}
+		if !found {
+			return CreateOriginatorResult{}, ErrPartnerNotAuthorized
+		}
+		if string(tpRecord.PartnerID) != cmd.PartnerID {
+			return CreateOriginatorResult{}, ErrPartnerNotAuthorized
+		}
+		if tpRecord.Status != domain.TPStatusActive {
+			return CreateOriginatorResult{}, ErrPartnerNotAuthorized
+		}
+		if now.After(tpRecord.ExpiresAt) || now.Equal(tpRecord.ExpiresAt) {
+			return CreateOriginatorResult{}, ErrPartnerNotAuthorized
+		}
+	}
+
+	idem, err := idempotencyruntime.NewService(uow.IdempotencyStore(), s.create.Protector, idempotencyruntime.WithClock(s.clock))
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	res, err := idem.Reserve(ctx, idempotencyruntime.ReserveRequest{Scope: scope, Fingerprint: fp, Now: now, ExpiresAt: now.Add(s.retentionPolicy.ReservationDuration())})
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	switch res.Status {
+	case idempotencyruntime.ReservationConflict:
+		return CreateOriginatorResult{}, ErrIdempotencyConflict
+	case idempotencyruntime.ReservationInProgress:
+		return CreateOriginatorResult{}, &InProgressError{Message: "create reservation active"}
+	case idempotencyruntime.ReservationReplay:
+		snap, ok, err := uow.ResultStore().GetCreateResult(ctx, res.Result)
+		if err != nil {
+			// Backend/query failure is not proof that the snapshot is
+			// permanently missing; it is a transient dependency failure.
+			return CreateOriginatorResult{}, ErrDependencyUnavailable
+		}
+		if !ok {
+			// A committed originator operation with an authoritatively missing
+			// result snapshot is known permanent replay loss.
+			return CreateOriginatorResult{}, ErrIdempotencyReplayUnavailable
+		}
+		aad, err := (replaycapsule.PreOnboardingAAD{ResourceID: snap.PreOnboardingRequestID, Scope: scope, Fingerprint: fp}).Bytes()
+		if err != nil {
+			return CreateOriginatorResult{}, ErrIdempotencyReplayUnavailable
+		}
+		token, err := idem.RecoverSecret(ctx, idempotencyruntime.RecoverSecretRequest{Scope: scope, Fingerprint: fp, AssociatedData: aad})
+		if err != nil {
+			return CreateOriginatorResult{}, mapRecovery(err)
+		}
+		return CreateOriginatorResult{Snapshot: snap, RequestAccessToken: string(token), Replay: true}, nil
+	case idempotencyruntime.ReservationNew:
+		if cmd.CredentialKind == authpolicy.CredentialKindTemporaryPrincipalToken {
+			tpStore := uow.TemporaryPrincipalStore()
+			tpRecord, found, err := tpStore.Get(ctx, cmd.CredentialBinding)
+			if err != nil || !found {
+				return CreateOriginatorResult{}, ErrDependencyUnavailable
+			}
+			if tpRecord.CommittedSubmissions >= tpRecord.MaxSubmissions {
+				return CreateOriginatorResult{}, ErrPartnerNotAuthorized
+			}
+			tpRecord.CommittedSubmissions++
+			if err := tpStore.Save(ctx, tpRecord); err != nil {
+				return CreateOriginatorResult{}, ErrDependencyUnavailable
+			}
+		}
+	default:
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	id, err := s.create.IDGenerator.NewPreOnboardingRequestID(ctx)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	token, err := s.create.TokenGenerator.NewRequestAccessToken(ctx)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	verifier, err := s.create.Verifier.Derive(authpolicy.CredentialKindRequestAccessToken, token)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	expires := now.Add(s.tokenLifetime.RequestAccessTokenLifetime())
+	req, err := domain.NewRequest(domain.ID(id), domain.PartnerID(cmd.PartnerID), cmd.ClaimedDevice, cmd.Agent, now, expires)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	if err = uow.RequestAccessWriter().CreateRequestAccess(ctx, verifier, capability.RequestAccessRecord{PreOnboardingRequestID: id, ExpiresAt: expires, State: capability.StateActive}); err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	if err = uow.Repository().Save(ctx, req); err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	etag := domain.ComputeETag(req, now)
+	loc, err := idempotencyruntime.NewResultLocator("preonboarding-create:" + id)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	snap := PreOnboardingCreateResultSnapshot{PreOnboardingRequestID: id, PartnerID: cmd.PartnerID, ExpiresAt: expires, Status: string(domain.StatePendingApproval), ETag: etag, Location: "/v1/pre-onboarding-requests/" + id, CommittedAt: now}
+	if err = uow.ResultStore().SaveCreateResult(ctx, loc, snap); err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	aad, err := (replaycapsule.PreOnboardingAAD{ResourceID: id, Scope: scope, Fingerprint: fp}).Bytes()
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	envelope, err := s.create.Protector.Seal(ctx, []byte(token), aad)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	actualCapsuleExpiry := capsuleExpiry(now, s.replayCapsulePolicy.ReplayCapsuleLifetime(), s.retentionPolicy.ReservationDuration())
+	capsule, err := idempotencyruntime.NewProtectedEnvelope(
+		envelope.Ciphertext(),
+		envelope.Nonce(),
+		envelope.KeyID(),
+		envelope.KeyVersion(),
+		actualCapsuleExpiry,
+	)
+	if err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	if err = uow.AuditWriter().StageEvent(ctx, AuditEvent{Type: AuditEventSubmitted, PreOnboardingRequestID: id, PartnerID: cmd.PartnerID, Timestamp: now, CorrelationID: cmd.CorrelationID}); err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	if _, err = idem.Commit(ctx, idempotencyruntime.CommitRequest{Token: res.Token, Scope: scope, Result: loc, Capsule: capsule}); err != nil {
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	if err = uow.Commit(ContextWithCommitClock(ctx, s.clock)); err != nil {
+		if errors.Is(err, ErrPartnerNotAuthorized) {
+			return CreateOriginatorResult{}, ErrPartnerNotAuthorized
+		}
+		if errors.Is(err, ErrPreconditionFailed) {
+			return CreateOriginatorResult{}, ErrPreconditionFailed
+		}
+		return CreateOriginatorResult{}, ErrDependencyUnavailable
+	}
+	return CreateOriginatorResult{Snapshot: snap, RequestAccessToken: token, Replay: false}, nil
 }
 
 // PublicGetResult holds the outcome of a public pre-onboarding read.
@@ -533,7 +756,7 @@ func (s *Service) Approve(ctx context.Context, admin AdminPrincipal, cmd Approve
 			return ApproveResult{}, ErrDependencyUnavailable
 		}
 
-		if err := uow.Commit(ctx); err != nil {
+		if err := uow.Commit(ContextWithCommitClock(ctx, s.clock)); err != nil {
 			if errors.Is(err, ErrPreconditionFailed) {
 				return ApproveResult{}, ErrPreconditionFailed
 			}
@@ -769,7 +992,7 @@ func (s *Service) Reject(ctx context.Context, admin AdminPrincipal, cmd RejectCo
 			return RejectResult{}, ErrDependencyUnavailable
 		}
 
-		if err := uow.Commit(ctx); err != nil {
+		if err := uow.Commit(ContextWithCommitClock(ctx, s.clock)); err != nil {
 			if errors.Is(err, ErrPreconditionFailed) {
 				return RejectResult{}, ErrPreconditionFailed
 			}
@@ -786,4 +1009,52 @@ func (s *Service) Reject(ctx context.Context, admin AdminPrincipal, cmd RejectCo
 	default:
 		return RejectResult{}, ErrDependencyUnavailable
 	}
+}
+
+func mapRecovery(err error) error {
+	if err == nil {
+		return nil
+	}
+	var recErr *idempotencyruntime.RecoveryError
+	if errors.As(err, &recErr) {
+		switch recErr.Reason {
+		case idempotencyruntime.RecoveryReasonNoCapsule,
+			idempotencyruntime.RecoveryReasonRecordExpired,
+			idempotencyruntime.RecoveryReasonCapsuleExpired:
+			// Known permanent replay-loss conditions.
+			return ErrIdempotencyReplayUnavailable
+		case idempotencyruntime.RecoveryReasonOpenFailed:
+			return classifyProtectorFailure(recErr.Cause)
+		case idempotencyruntime.RecoveryReasonUnavailable:
+			// The exact replay gate was not satisfied for this committed
+			// operation; recovery is authoritatively not available.
+			return ErrIdempotencyReplayUnavailable
+		default:
+			// Unknown reason: fail safe as dependency unavailable.
+			return ErrDependencyUnavailable
+		}
+	}
+	return classifyProtectorFailure(err)
+}
+
+// classifyProtectorFailure maps a protector/dependency failure to the frozen
+// permanent/transient public distinction. Only an explicitly typed permanent
+// recovery-material failure may become 409 replay-unavailable; an explicitly
+// typed transient failure and any unclassified/unknown error fail safe as 503
+// dependency-unavailable.
+func classifyProtectorFailure(err error) error {
+	if errors.Is(err, replaycapsule.ErrTransient) {
+		return ErrDependencyUnavailable
+	}
+	if errors.Is(err, replaycapsule.ErrPermanent) {
+		return ErrIdempotencyReplayUnavailable
+	}
+	return ErrDependencyUnavailable
+}
+
+type CreateDependencies struct {
+	IDGenerator    IDGenerator
+	TokenGenerator TokenGenerator
+	Verifier       capability.Verifier
+	Protector      idempotencyruntime.Protector
 }

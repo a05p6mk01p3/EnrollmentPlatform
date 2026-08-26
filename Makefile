@@ -1,7 +1,7 @@
 # Enrollment Platform — build orchestration.
 # Generated OpenAPI code is produced by make generate and is never edited by hand.
 
-OPENAPI_SPEC       := docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.2.yaml
+OPENAPI_SPEC       := docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.3.yaml
 OPENAPI_GEN_CONFIG := build/oapi-codegen.yaml
 OPENAPI_CODEGEN    := github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.0
 GENERATED_API      := internal/generated/openapi/api.gen.go

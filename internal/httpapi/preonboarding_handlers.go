@@ -33,7 +33,77 @@ func (s *Server) wrapPreOnboarding(inner openapi.StrictServerInterface) openapi.
 // In M5.5, mandatory secret-originator capabilities are absent, so production execution
 // MUST fail closed with 503 before any durable domain side effect.
 func (d *preOnboardingDecorator) CreatePreOnboardingRequest(ctx context.Context, request openapi.CreatePreOnboardingRequestRequestObject) (openapi.CreatePreOnboardingRequestResponseObject, error) {
-	return createPreOnboarding503(ctx), nil
+	if request.Body == nil {
+		return createPreOnboarding400(ctx), nil
+	}
+	ac, ok := authruntime.AuthenticationContextFrom(ctx)
+	if !ok || ac == nil {
+		return createPreOnboarding503(ctx), nil
+	}
+	var kind authpolicy.CredentialKind
+	var binding string
+	if ac.Has(authpolicy.CredentialKindHumanOIDC) {
+		b, ok := ac.Binding(authpolicy.CredentialKindHumanOIDC)
+		if !ok {
+			return createPreOnboarding503(ctx), nil
+		}
+		o, ok := b.OIDCIdentity()
+		if !ok {
+			return createPreOnboarding503(ctx), nil
+		}
+		kind = authpolicy.CredentialKindHumanOIDC
+		binding = o.Issuer + "|" + o.Subject
+	} else if ac.Has(authpolicy.CredentialKindTemporaryPrincipalToken) {
+		b, ok := ac.Binding(authpolicy.CredentialKindTemporaryPrincipalToken)
+		if !ok {
+			return createPreOnboarding503(ctx), nil
+		}
+		tp, ok := b.TemporaryPrincipal()
+		if !ok {
+			return createPreOnboarding503(ctx), nil
+		}
+		kind = authpolicy.CredentialKindTemporaryPrincipalToken
+		binding = tp.TemporaryPrincipalID
+	} else {
+		return createPreOnboarding503(ctx), nil
+	}
+	b := request.Body
+	claimed := domain.ClaimedDevice{Hostname: b.ClaimedDevice.Hostname}
+	if b.ClaimedDevice.SerialNumber != nil {
+		claimed.SerialNumber = *b.ClaimedDevice.SerialNumber
+	}
+	if b.ClaimedDevice.SmbiosUuid != nil {
+		claimed.SMBIOSUUID = *b.ClaimedDevice.SmbiosUuid
+	}
+	if b.ClaimedDevice.Manufacturer != nil {
+		claimed.Manufacturer = *b.ClaimedDevice.Manufacturer
+	}
+	if b.ClaimedDevice.Model != nil {
+		claimed.Model = *b.ClaimedDevice.Model
+	}
+	if b.ClaimedDevice.TpmPresent != nil {
+		claimed.TPMPresent = *b.ClaimedDevice.TpmPresent
+	}
+	if b.ClaimedDevice.TpmVendor != nil {
+		claimed.TPMVendor = *b.ClaimedDevice.TpmVendor
+	}
+	if b.ClaimedDevice.EkPublicHash != nil {
+		claimed.EKPublicHash = *b.ClaimedDevice.EkPublicHash
+	}
+	res, err := d.service.CreateOriginator(ctx, preonboardingapp.CreateOriginatorCommand{CreateCommand: preonboardingapp.CreateCommand{PartnerID: string(b.PartnerId), ClaimedDevice: claimed, Agent: domain.Agent{Platform: string(b.Agent.Platform), Version: b.Agent.Version}}, CredentialKind: kind, CredentialBinding: binding, IdempotencyKey: request.Params.IdempotencyKey, CorrelationID: problem.CorrelationID(ctx)})
+	if err != nil {
+		if errors.Is(err, preonboardingapp.ErrPartnerNotAuthorized) {
+			return createPreOnboarding403(ctx, "PARTNER_NOT_AUTHORIZED"), nil
+		}
+		if errors.Is(err, preonboardingapp.ErrIdempotencyReplayUnavailable) {
+			return openapi.CreatePreOnboardingRequest409ApplicationProblemPlusJSONResponse{IdempotencyReplayConflictOrUnavailableApplicationProblemPlusJSONResponse: openapi.IdempotencyReplayConflictOrUnavailableApplicationProblemPlusJSONResponse{Body: problemDetail(ctx, http.StatusConflict, "IDEMPOTENCY_REPLAY_UNAVAILABLE", problem.TypeIdempotencyReplayUnavailable, "Idempotency replay unavailable", false), Headers: openapi.IdempotencyReplayConflictOrUnavailableResponseHeaders{XCorrelationID: correlationPtr(ctx)}}}, nil
+		}
+		if errors.Is(err, preonboardingapp.ErrIdempotencyConflict) {
+			return openapi.CreatePreOnboardingRequest409ApplicationProblemPlusJSONResponse{IdempotencyReplayConflictOrUnavailableApplicationProblemPlusJSONResponse: openapi.IdempotencyReplayConflictOrUnavailableApplicationProblemPlusJSONResponse{Body: problemDetail(ctx, http.StatusConflict, "IDEMPOTENCY_CONFLICT", problem.TypeIdempotencyConflict, "Idempotency conflict", false), Headers: openapi.IdempotencyReplayConflictOrUnavailableResponseHeaders{XCorrelationID: correlationPtr(ctx)}}}, nil
+		}
+		return createPreOnboarding503(ctx), nil
+	}
+	return openapi.CreatePreOnboardingRequest201JSONResponse{Body: openapi.PreOnboardingCreateResponse{PreOnboardingRequestId: openapi.ResourceId(res.Snapshot.PreOnboardingRequestID), PartnerId: openapi.ResourceId(res.Snapshot.PartnerID), ExpiresAt: res.Snapshot.ExpiresAt, Status: openapi.PreOnboardingCreateResponseStatusPENDINGAPPROVAL, RequestAccessToken: res.RequestAccessToken}, Headers: openapi.CreatePreOnboardingRequest201ResponseHeaders{ETag: strPtr(res.Snapshot.ETag), Location: strPtr(res.Snapshot.Location), XCorrelationID: correlationPtr(ctx)}}, nil
 }
 
 // GetPreOnboardingRequest executes public read of a pre-onboarding request.

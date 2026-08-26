@@ -11,7 +11,8 @@ var (
 
 	// ErrIdempotencyConflict indicates a duplicate request with the same Idempotency-Key
 	// but mismatched semantic fingerprint.
-	ErrIdempotencyConflict = errors.New("application: idempotency conflict (same key with different fingerprint)")
+	ErrIdempotencyConflict          = errors.New("application: idempotency conflict (same key with different fingerprint)")
+	ErrIdempotencyReplayUnavailable = errors.New("application: idempotency replay unavailable")
 
 	// ErrPartnerNotAuthorized indicates the administrative principal lacks current server-side
 	// authority for the partner.

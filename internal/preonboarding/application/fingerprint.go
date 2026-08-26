@@ -5,7 +5,22 @@ import (
 	"fmt"
 
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/idempotency/runtime"
+	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/domain"
 )
+
+type canonicalCreatePayload struct {
+	PartnerID     string               `json:"partner_id"`
+	ClaimedDevice domain.ClaimedDevice `json:"claimed_device"`
+	Agent         domain.Agent         `json:"agent"`
+}
+
+func ComputeCreateFingerprint(cmd CreateOriginatorCommand) (runtime.Fingerprint, error) {
+	b, err := json.Marshal(canonicalCreatePayload{PartnerID: cmd.PartnerID, ClaimedDevice: cmd.ClaimedDevice, Agent: cmd.Agent})
+	if err != nil {
+		return runtime.Fingerprint{}, err
+	}
+	return runtime.FingerprintRequest(runtime.FingerprintVersion1, "POST", "/v1/pre-onboarding-requests", b)
+}
 
 // canonicalDecisionPayload holds the semantic fields included in decision
 // fingerprint generation. Transport noise, correlation IDs, and irrelevant

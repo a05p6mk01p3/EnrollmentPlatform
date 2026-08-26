@@ -27,7 +27,7 @@ const (
 // package-level lookup table.
 func knownSecretReplayField(key string) bool {
 	switch key {
-	case "secretField", "mechanism", "sameSecretRequired", "activeVerifierStorage", "capsulePurpose":
+	case "secretField", "mechanism", "sameSecretRequired", "activeVerifierStorage", "capsulePurpose", "originator", "effectiveScope", "aadV1", "aadEncoding", "recovery", "replayAuthority":
 		return true
 	default:
 		return false

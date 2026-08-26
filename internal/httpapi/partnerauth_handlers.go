@@ -94,11 +94,31 @@ func (d *partnerAuthDecorator) CreatePreOnboardingRequest(ctx context.Context, r
 		}
 
 	case ac.Has(authpolicy.CredentialKindTemporaryPrincipalToken):
-		// Production TemporaryPrincipalToken pre-onboarding remains fail-closed:
-		// the concrete token verifier/bootstrap and the transactional
-		// max_submissions/quota consumption gates are not implemented in M5.2.
-		// The M5.2 selection sub-gate alone never yields a production 201.
-		return createPreOnboarding503(ctx), nil
+		b, ok := ac.Binding(authpolicy.CredentialKindTemporaryPrincipalToken)
+		if !ok {
+			return createPreOnboarding503(ctx), nil
+		}
+		tp, ok := b.TemporaryPrincipal()
+		if !ok {
+			return createPreOnboarding503(ctx), nil
+		}
+		if request.Body == nil {
+			return createPreOnboarding400(ctx), nil
+		}
+		decision, err := d.service.AuthorizeTemporaryPrincipalPreOnboarding(ctx, partnerauth.TemporaryPrincipalID(tp.TemporaryPrincipalID), request.Body.PartnerId)
+		if err != nil || decision == partnerauth.SelectionIndeterminate {
+			return createPreOnboarding503(ctx), nil
+		}
+		switch decision {
+		case partnerauth.SelectionAllowed:
+			return d.StrictServerInterface.CreatePreOnboardingRequest(ctx, request)
+		case partnerauth.SelectionDeniedPartner:
+			return createPreOnboarding403(ctx, "PARTNER_NOT_AUTHORIZED"), nil
+		case partnerauth.SelectionDeniedScope:
+			return createPreOnboarding403(ctx, "SCOPE_DENIED"), nil
+		default:
+			return createPreOnboarding503(ctx), nil
+		}
 
 	default:
 		// The authn policy restricts this route to HumanOIDC or

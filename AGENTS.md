@@ -4,11 +4,11 @@
 
 For implementation work, use the following sources in this order:
 
-1. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.2.yaml`
+1. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.3.yaml`
    - executable HTTP/API contract
-2. `docs/Enrollment_Platform_Enrollment_Protocol_Specification_v0.2.3.docx`
+2. `docs/Enrollment_Platform_Enrollment_Protocol_Specification_v0.2.4.docx`
    - normative protocol semantics
-3. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.2_README.md`
+3. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.3_README.md`
    - implementation and contract notes
 
 Do not modify these controlled documents unless explicitly authorized.
@@ -119,7 +119,7 @@ Opaque authentication tokens use non-reversible server-side verifiers.
 
 For server-generated secrets returned by an originating response,
 the protocol permits only the temporary encrypted Idempotency Replay Capsule
-defined in Protocol v0.2.3.
+defined in Protocol v0.2.4.
 
 The replay capsule:
 
@@ -129,6 +129,16 @@ The replay capsule:
 - must never be logged;
 - must never be stored as plaintext;
 - must never permit a second enrollment or token minting during replay.
+
+### Replay Capsule AAD and recovery (CR-M5.6-001)
+
+- Normative AAD v1 is the complete ordered originator-resource tuple defined by Protocol §6.4; `enrollment_id` is not universal and `idempotency_record_id` is never normative AAD.
+- EffectiveScope remains the frozen M5.4 credential kind + opaque server-authenticated binding + uppercase method + route template + exact Idempotency-Key; no raw bearer/Authorization/client assertion substitutes.
+- Same scope and fingerprint recover the exact original secret, never a replacement. Replay has no mutation or quota authority.
+- Pre-onboarding replay uses the committed result snapshot for the original 201 body, ETag and Location; current-attempt correlation ID is excluded from scope/fingerprint/AAD and replay does not emit another `PREONBOARD_SUBMITTED` event.
+- Permanent capsule loss is `409 IDEMPOTENCY_REPLAY_UNAVAILABLE`; transient protector failure is `503 DEPENDENCY_UNAVAILABLE`; fingerprint mismatch remains `409 IDEMPOTENCY_CONFLICT`.
+- M5.4 Reserve for secret-originator execution must be inside the transaction-bound Unit of Work. NEW alone consumes Temporary Principal quota; never freeze OPEN-009 DB mechanics or CG-003 quantitative TTLs.
+- M4 capability authentication remains read-only; credential issuance/verifier persistence and quota mutation are a separate lifecycle/write boundary.
 
 ---
 
@@ -361,8 +371,8 @@ Report:
 
 If a requested implementation conflicts with:
 
-- OpenAPI v0.1.2;
-- Protocol v0.2.3;
+- OpenAPI v0.1.3;
+- Protocol v0.2.4;
 - an architecture invariant in this file;
 
 do not silently resolve the conflict.
