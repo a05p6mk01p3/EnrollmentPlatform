@@ -1,9 +1,9 @@
 // Command enrollment-api is the Enrollment Platform API service.
 //
 // Current scope: composition-root skeleton. It loads configuration and prepares
-// the HTTP adapter (correlation + contract enforcement + generated router), but
-// does not start a listener and does not register business handlers (those
-// arrive in later milestones). No business behavior is simulated here.
+// the HTTP/application boundaries, but does not start a listener. Dependencies
+// without an operational provider are wired explicitly fail-closed; no business
+// success is simulated by this command.
 package main
 
 import (
@@ -11,6 +11,8 @@ import (
 	"os"
 
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
+	enrollmentapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/enrollment/application"
+	enrollmentrecovery "github.com/a05p6mk01p3/EnrollmentPlatform/internal/enrollment/recovery"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/partnerauth"
 	preonboardingapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/preonboarding/application"
@@ -30,23 +32,25 @@ func run() error {
 		return err
 	}
 
-	// Composition root: prepare the HTTP adapter (contract enforcement
-	// middleware + generated router). No listener is started and no business
-	// handler is registered in this milestone.
+	// Composition root: prepare the HTTP/application boundaries. No listener is
+	// started by this command.
 	//
-	// M5.2 partner authorization, M5.3 resource ownership, and M5.5 pre-onboarding
-	// are explicitly wired as unavailable, fail-closed providers while no real
-	// durable transactional providers exist: no request can resolve partner
-	// authorization, ownership, or pre-onboarding mutations, and all protected
-	// operations fail closed.
+	// M5.2 partner authorization, M5.3 resource ownership, M5.5 pre-onboarding,
+	// and M5.7 enrollment execution/recovery are explicitly wired as
+	// unavailable, fail-closed providers while no real durable transactional
+	// providers exist. No protected business operation is simulated here.
 	partnerSvc := partnerauth.NewUnavailableService()
 	ownershipSvc := resourceownership.NewUnavailableService(partnerSvc)
 	preonboardSvc := preonboardingapp.NewUnavailableService()
+	enrollmentSvc := enrollmentapp.NewUnavailableService()
+	enrollmentRecovery := enrollmentrecovery.NewUnavailableRecognizer()
 
 	server, err := httpapi.NewServer(cfg,
 		httpapi.WithPartnerAuthService(partnerSvc),
 		httpapi.WithResourceOwnershipService(ownershipSvc),
 		httpapi.WithPreOnboardingService(preonboardSvc),
+		httpapi.WithEnrollmentService(enrollmentSvc),
+		httpapi.WithEnrollmentRecoveryRecognizer(enrollmentRecovery),
 	)
 	if err != nil {
 		return err

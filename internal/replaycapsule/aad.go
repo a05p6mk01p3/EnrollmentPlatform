@@ -10,12 +10,15 @@ import (
 )
 
 const (
-	Domain                              = "enrollment-platform/replay-capsule-aad"
-	Version                      uint32 = 1
-	CreatePreOnboardingOperation        = "createPreOnboardingRequest"
-	PreOnboardingResourceKind           = "PRE_ONBOARDING_REQUEST"
-	RequestAccessCredentialType         = "REQUEST_ACCESS_TOKEN"
-	IssuedCredentialVersion      uint32 = 1
+	Domain                                = "enrollment-platform/replay-capsule-aad"
+	Version                        uint32 = 1
+	CreatePreOnboardingOperation          = "createPreOnboardingRequest"
+	PreOnboardingResourceKind             = "PRE_ONBOARDING_REQUEST"
+	RequestAccessCredentialType           = "REQUEST_ACCESS_TOKEN"
+	CreateEnrollmentOperation             = "createEnrollment"
+	EnrollmentResourceKind                = "ENROLLMENT"
+	EnrollmentAccessCredentialType        = "ENROLLMENT_ACCESS_TOKEN"
+	IssuedCredentialVersion        uint32 = 1
 )
 
 // PreOnboardingAAD contains the complete CR-M5.6-001 v1 tuple for a
@@ -48,6 +51,41 @@ func (a PreOnboardingAAD) Bytes() ([]byte, error) {
 		fingerprintVersion:      uint32(a.Fingerprint.Version()),
 		fingerprintDigest:       digest[:],
 		issuedCredentialType:    RequestAccessCredentialType,
+		issuedCredentialVersion: IssuedCredentialVersion,
+	})
+}
+
+// EnrollmentAAD contains the complete CR-M5.6-001 v1 tuple for an
+// EnrollmentAccessToken issued by createEnrollment.
+type EnrollmentAAD struct {
+	ResourceID  string
+	Scope       runtime.EffectiveScope
+	Fingerprint runtime.Fingerprint
+}
+
+// Bytes renders the exact createEnrollment originator-resource AAD tuple.
+// It shares the same 14-field encoding as PreOnboardingAAD but freezes the
+// enrollment-specific operation/resource/credential constants required by
+// OpenAPI v0.1.3 and Protocol v0.2.4.
+func (a EnrollmentAAD) Bytes() ([]byte, error) {
+	if a.ResourceID == "" || a.Scope.IsZero() || a.Fingerprint.IsZero() {
+		return nil, fmt.Errorf("replay capsule AAD: incomplete enrollment tuple")
+	}
+	digest := a.Fingerprint.Digest()
+	return encodeAAD(aadFields{
+		domain:                  Domain,
+		version:                 Version,
+		operation:               CreateEnrollmentOperation,
+		resourceKind:            EnrollmentResourceKind,
+		resourceID:              a.ResourceID,
+		credentialKind:          string(a.Scope.Credential().Kind()),
+		credentialBinding:       a.Scope.Credential().Binding(),
+		method:                  a.Scope.Method(),
+		route:                   a.Scope.Route(),
+		idempotencyKey:          a.Scope.Key().String(),
+		fingerprintVersion:      uint32(a.Fingerprint.Version()),
+		fingerprintDigest:       digest[:],
+		issuedCredentialType:    EnrollmentAccessCredentialType,
 		issuedCredentialVersion: IssuedCredentialVersion,
 	})
 }

@@ -517,6 +517,18 @@ func capabilityResourceMatches(ac *AuthenticationContext, kind authpolicy.Creden
 	}
 }
 
+// BearerTokenFromRequest applies the exact strict Authorization syntax used by
+// M4 base authentication and returns the opaque bearer token without
+// classifying it as any credential kind. M5.7 uses this only after ordinary
+// authentication has already failed, so consumed-capability recovery cannot
+// become an alternate M4 authenticator.
+func BearerTokenFromRequest(r *http.Request) (string, bool, error) {
+	if r == nil {
+		return "", false, errBearerMalformed
+	}
+	return extractBearer(r.Header.Values("Authorization"))
+}
+
 // authenticate evaluates the base policy against the request's credential
 // signals and produces the request-local AuthenticationContext.
 func (rt *Runtime) authenticate(r *http.Request, policy *authpolicy.OperationPolicy) (*AuthenticationContext, error) {

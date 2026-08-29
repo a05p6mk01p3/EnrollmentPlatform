@@ -2,16 +2,18 @@
 //
 // The adapter layers the handwritten authentication boundary (M4.2), the
 // contract-enforcement middleware (payload ceiling, media type, strict JSON,
-// precompiled JSON Schema validation), the authorization boundary (M5.1),
-// and the correlation middleware around the generated chi router and strict handlers:
+// precompiled JSON Schema validation), the authorization boundary (M5.1), the
+// M5.7 consumed-capability response-recovery fallback when configured, and the
+// correlation middleware around the generated chi router and strict handlers:
 //
 //	correlation -> generated chi router (route match)
-//	  -> Phase A base authentication (M4.2)
-//	    -> contract enforcement (M3, fail-closed)
-//	      -> Phase B conditional authentication (M4.2)
-//	        -> capability resource binding (M4.3)
-//	          -> domain authorization (M5.1)
-//	            -> strict handler wrapper -> StrictServerInterface (business handlers)
+//	  -> M5.7 consumed-capability fallback (createEnrollment only; normal path first)
+//	    -> Phase A base authentication (M4.2)
+//	      -> contract enforcement (M3, fail-closed)
+//	        -> Phase B conditional authentication (M4.2)
+//	          -> capability resource binding (M4.3)
+//	            -> domain authorization (M5.1)
+//	              -> strict handler wrapper -> StrictServerInterface (business handlers)
 //
 // Concrete credential verification and domain authorization evaluators plug in
 // through the respective authn and authz ports.
@@ -26,6 +28,8 @@ import (
 	authzpolicy "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authz/policy"
 	authzruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/authz/runtime"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/config"
+	enrollmentapp "github.com/a05p6mk01p3/EnrollmentPlatform/internal/enrollment/application"
+	enrollmentrecovery "github.com/a05p6mk01p3/EnrollmentPlatform/internal/enrollment/recovery"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/generated/openapi"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi/middleware"
 	"github.com/a05p6mk01p3/EnrollmentPlatform/internal/httpapi/problem"
@@ -75,15 +79,25 @@ type Server struct {
 	// preonboarding is the M5.5 Pre-Onboarding lifecycle application service.
 	preonboarding *preonboardingapp.Service
 
+	// enrollment is the M5.7 INITIAL createEnrollment application boundary.
+	// enrollmentRecovery is the separate consumed-capability recognizer used
+	// only for exact response-loss recovery after ordinary M4 authentication
+	// has rejected a consumed RequestAccessToken. They are configured as an
+	// all-or-none pair so a partially wired recovery path cannot start.
+	enrollment         *enrollmentapp.Service
+	enrollmentRecovery *enrollmentrecovery.Recognizer
+
 	// Option inputs, resolved by NewServer.
-	authnRegistry             *authruntime.Registry
-	authnRegistryExplicit     bool
-	deviceSource              authruntime.DeviceMTLSSource
-	authzRegistry             *authzruntime.Registry
-	authzRegistryExplicit     bool
-	partnerAuthExplicit       bool
-	resourceOwnershipExplicit bool
-	preonboardingExplicit     bool
+	authnRegistry              *authruntime.Registry
+	authnRegistryExplicit      bool
+	deviceSource               authruntime.DeviceMTLSSource
+	authzRegistry              *authzruntime.Registry
+	authzRegistryExplicit      bool
+	partnerAuthExplicit        bool
+	resourceOwnershipExplicit  bool
+	preonboardingExplicit      bool
+	enrollmentExplicit         bool
+	enrollmentRecoveryExplicit bool
 }
 
 // Option customizes Server construction.
@@ -151,6 +165,28 @@ func WithPreOnboardingService(svc *preonboardingapp.Service) Option {
 	return func(s *Server) {
 		s.preonboarding = svc
 		s.preonboardingExplicit = true
+	}
+}
+
+// WithEnrollmentService wires the M5.7 INITIAL createEnrollment application
+// service. It must be paired with WithEnrollmentRecoveryRecognizer; supplying
+// only one side is a startup error. Omitting both preserves the generic HTTP
+// adapter surface used by earlier-milestone boundary tests, while production
+// composition wires the pair explicitly.
+func WithEnrollmentService(svc *enrollmentapp.Service) Option {
+	return func(s *Server) {
+		s.enrollment = svc
+		s.enrollmentExplicit = true
+	}
+}
+
+// WithEnrollmentRecoveryRecognizer wires the separate read-only recognizer for
+// retained CONSUMED RequestAccessToken possession. It never changes M4 ordinary
+// authentication semantics and must be paired with WithEnrollmentService.
+func WithEnrollmentRecoveryRecognizer(recognizer *enrollmentrecovery.Recognizer) Option {
+	return func(s *Server) {
+		s.enrollmentRecovery = recognizer
+		s.enrollmentRecoveryExplicit = true
 	}
 }
 
@@ -275,6 +311,28 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 		return nil, fmt.Errorf("validating pre-onboarding service: %w", err)
 	}
 
+	// M5.7 enrollment execution and consumed-token recovery are an all-or-none
+	// composition pair. Recovery is deliberately not folded into the M4
+	// authenticator registry: ordinary RequestAccessToken authentication remains
+	// read-only and continues to reject CONSUMED.
+	if s.enrollmentExplicit != s.enrollmentRecoveryExplicit {
+		return nil, fmt.Errorf("validating enrollment boundary: service and recovery recognizer must be supplied together")
+	}
+	if s.enrollmentExplicit {
+		if s.enrollment == nil {
+			return nil, fmt.Errorf("validating enrollment service: nil or typed-nil service")
+		}
+		if err := s.enrollment.Validate(); err != nil {
+			return nil, fmt.Errorf("validating enrollment service: %w", err)
+		}
+		if s.enrollmentRecovery == nil {
+			return nil, fmt.Errorf("validating enrollment recovery recognizer: nil or typed-nil recognizer")
+		}
+		if err := s.enrollmentRecovery.Validate(); err != nil {
+			return nil, fmt.Errorf("validating enrollment recovery recognizer: %w", err)
+		}
+	}
+
 	enforcer, err := middleware.NewEnforcer(canonical, cfg.GeneralJSONDefaultBytes, cfg.AbsoluteRequestBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("preparing contract enforcement: %w", err)
@@ -288,19 +346,20 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 // contract enforcement and domain authorization; the caller is responsible for the listener.
 //
 // The M5.2 partner authorization, M5.3 resource ownership, and M5.5 pre-onboarding
-// boundaries are MANDATORY parts of this composition: the supplied StrictServerInterface is
-// wrapped in explicit order:
+// boundaries are mandatory. When the M5.7 enrollment pair is configured, its
+// createEnrollment decorator is inserted inside those generic boundaries and its
+// consumed-capability recovery middleware is the outermost per-operation fallback.
+// The fallback still runs the ordinary M4 path first and never publishes an
+// AuthenticationContext for a consumed credential.
 //
-//	wrapResourceOwnership(
-//	  wrapPartnerAuth(
-//	    wrapPreOnboarding(ssi),
-//	  ),
-//	)
-//
-// The wrappers are private (wrapPartnerAuth, wrapResourceOwnership, wrapPreOnboarding)
-// and cannot be bypassed through the public surface.
+// All business wrappers are private and cannot be selectively bypassed through
+// the public Handler surface.
 func (s *Server) Handler(ssi openapi.StrictServerInterface) http.Handler {
-	strictSI := openapi.NewStrictHandlerWithOptions(s.wrapResourceOwnership(s.wrapPartnerAuth(s.wrapPreOnboarding(ssi))), nil, openapi.StrictHTTPServerOptions{
+	business := s.wrapPreOnboarding(ssi)
+	if s.enrollmentExplicit {
+		business = s.wrapEnrollment(business)
+	}
+	strictSI := openapi.NewStrictHandlerWithOptions(s.wrapResourceOwnership(s.wrapPartnerAuth(business)), nil, openapi.StrictHTTPServerOptions{
 		// Defense in depth: with enforcement upstream these should not fire,
 		// but if the generated decoder or a handler fails, answers stay
 		// RFC 9457-shaped.
@@ -312,27 +371,36 @@ func (s *Server) Handler(ssi openapi.StrictServerInterface) http.Handler {
 		},
 	})
 
+	middlewares := []openapi.MiddlewareFunc{
+		// The generated chi wrapper builds the chain by wrapping in slice
+		// order, so the LAST element of this slice ends up OUTERMOST and
+		// runs FIRST. The slice below is therefore ordered to yield the
+		// required runtime pipeline:
+		//
+		//   BaseAuthentication -> M3 contract enforcement
+		//     -> ConditionalAuthentication (Phase B, publishes the
+		//        effective conditional requirement)
+		//       -> capability resource binding (M4.3, follows the
+		//          effective policy; SOL-M4.3-002)
+		//         -> domain authorization (M5.1, enforces confirmed scopes
+		//            and OPEN policy decisions before handlers run)
+		//           -> strict handler
+		openapi.MiddlewareFunc(s.authz.OperationMiddleware()),
+		openapi.MiddlewareFunc(s.authn.ResourceBinding()),
+		openapi.MiddlewareFunc(s.authn.ConditionalAuthentication()),
+		openapi.MiddlewareFunc(s.enforcer.OperationMiddleware()),
+		openapi.MiddlewareFunc(s.authn.BaseAuthentication()),
+	}
+	if s.enrollmentExplicit {
+		// Appended last => outermost in the generated chi chain. It first lets
+		// ordinary M4 authentication run. Only an actual 401 can enter the
+		// narrow consumed-capability recovery fallback; ACTIVE credentials never
+		// bypass M4.
+		middlewares = append(middlewares, openapi.MiddlewareFunc(s.enrollmentRecoveryMiddleware()))
+	}
+
 	router := openapi.HandlerWithOptions(strictSI, openapi.ChiServerOptions{
-		Middlewares: []openapi.MiddlewareFunc{
-			// The generated chi wrapper builds the chain by wrapping in slice
-			// order, so the LAST element of this slice ends up OUTERMOST and
-			// runs FIRST. The slice below is therefore ordered to yield the
-			// required runtime pipeline:
-			//
-			//   BaseAuthentication -> M3 contract enforcement
-			//     -> ConditionalAuthentication (Phase B, publishes the
-			//        effective conditional requirement)
-			//       -> capability resource binding (M4.3, follows the
-			//          effective policy; SOL-M4.3-002)
-			//         -> domain authorization (M5.1, enforces confirmed scopes
-			//            and OPEN policy decisions before handlers run)
-			//           -> strict handler
-			openapi.MiddlewareFunc(s.authz.OperationMiddleware()),
-			openapi.MiddlewareFunc(s.authn.ResourceBinding()),
-			openapi.MiddlewareFunc(s.authn.ConditionalAuthentication()),
-			openapi.MiddlewareFunc(s.enforcer.OperationMiddleware()),
-			openapi.MiddlewareFunc(s.authn.BaseAuthentication()),
-		},
+		Middlewares: middlewares,
 		ErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			problem.WriteInvalidRequest(w, r, "request parameters could not be parsed")
 		},
