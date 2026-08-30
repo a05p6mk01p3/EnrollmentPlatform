@@ -378,16 +378,19 @@ func (s *Server) Handler(ssi openapi.StrictServerInterface) http.Handler {
 		// required runtime pipeline:
 		//
 		//   BaseAuthentication -> M3 contract enforcement
-		//     -> ConditionalAuthentication (Phase B, publishes the
-		//        effective conditional requirement)
-		//       -> capability resource binding (M4.3, follows the
-		//          effective policy; SOL-M4.3-002)
-		//         -> domain authorization (M5.1, enforces confirmed scopes
-		//            and OPEN policy decisions before handlers run)
-		//           -> strict handler
+		//     -> raw evidence capture (evidence route only; no semantic
+		//        decision, no error-precedence change)
+		//       -> ConditionalAuthentication (Phase B, publishes the
+		//          effective conditional requirement)
+		//         -> capability resource binding (M4.3, follows the
+		//            effective policy; SOL-M4.3-002)
+		//           -> domain authorization (M5.1, enforces confirmed scopes
+		//              and OPEN policy decisions before handlers run)
+		//             -> strict handler
 		openapi.MiddlewareFunc(s.authz.OperationMiddleware()),
 		openapi.MiddlewareFunc(s.authn.ResourceBinding()),
 		openapi.MiddlewareFunc(s.authn.ConditionalAuthentication()),
+		openapi.MiddlewareFunc(s.rawEvidenceCapture()),
 		openapi.MiddlewareFunc(s.enforcer.OperationMiddleware()),
 		openapi.MiddlewareFunc(s.authn.BaseAuthentication()),
 	}

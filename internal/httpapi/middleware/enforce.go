@@ -5,9 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -51,6 +54,13 @@ type Enforcer struct {
 	decodedRules map[string][]decodedLimitRule
 	bodyBytes    int64 // effective JSON body limit: min(general, absolute)
 	maxBodyBytes int64 // absolute platform backstop
+
+	// evidenceSkipPaths are the duplicate-detection skip paths for the evidence
+	// operation, derived ONCE at startup from the canonical x-evidence-identity
+	// extension after structural validation. nil means full M3 strict checking
+	// (metadata missing or operation absent). The value never depends on any
+	// request material.
+	evidenceSkipPaths [][]string
 }
 
 // decodedLimitRule enforces a decoded-byte ceiling on one base64 field of an
@@ -108,6 +118,9 @@ func NewEnforcer(canonical *openapi3.T, generalJSONBytes, absoluteBodyBytes int6
 		decodedRules: decodedRules,
 		bodyBytes:    minInt64(generalJSONBytes, absoluteBodyBytes),
 		maxBodyBytes: absoluteBodyBytes,
+	}
+	if err := e.deriveEvidenceSkipPaths(view); err != nil {
+		return nil, err
 	}
 	for path, pi := range view.Paths.Map() {
 		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
@@ -183,7 +196,7 @@ func (e *Enforcer) OperationMiddleware() func(http.Handler) http.Handler {
 						return
 					}
 
-					if err := validateJSONDocument(bytes.NewReader(data)); err != nil {
+					if err := validateJSONDocumentSkipping(bytes.NewReader(data), e.evidenceOpaquePathsFor(cop)); err != nil {
 						problem.WriteInvalidRequest(w, r, "request body is not a single valid JSON document")
 						return
 					}
@@ -282,6 +295,212 @@ func (e *Enforcer) OperationMiddleware() func(http.Handler) http.Handler {
 // and the spec-derived index.
 func routeKey(method, pathPattern string) string {
 	return strings.ToUpper(method) + " " + pathPattern
+}
+
+// evidenceOperationID is the canonical operationId of the evidence submission
+// operation in the controlled OpenAPI v0.1.5 contract. It is used only to
+// locate the operation object inside the spec (never as a route table).
+const evidenceOperationID = "submitEnrollmentEvidence"
+
+// evidenceIdentityComponent is one authoritative component declaration of the
+// EvidenceIdentityV1 encoding (OpenAPI v0.1.5 x-evidence-identity). jcsPath is
+// the root-relative object-member path of the request body sub-tree whose
+// duplicate-member detection is delegated to the application identity
+// boundary; it is non-nil only for the two JCS-identity-bearing components.
+type evidenceIdentityComponent struct {
+	declaration string
+	jcsPath     []string
+}
+
+// canonicalEvidenceIdentityComponents is the complete, ordered component list
+// declared by the controlled OpenAPI v0.1.5 contract for EvidenceIdentityV1.
+// Component count and order are authoritative and must match exactly.
+var canonicalEvidenceIdentityComponents = []evidenceIdentityComponent{
+	{declaration: "domain UTF-8 literal enrollment-platform/evidence-identity"},
+	{declaration: "identity_version unsigned-big-endian integer 1"},
+	{declaration: "authoritative route-bound enrollment_id UTF-8"},
+	{declaration: "challenge_version unsigned-big-endian integer"},
+	{declaration: "csr_der_sha256 raw 32-byte SHA-256 of decoded validated PKCS#10 DER"},
+	{declaration: "jws_compact exact UTF-8 validated JWS Compact Serialization"},
+	{declaration: "tpm_evidence.format validated UTF-8"},
+	{declaration: "tpm_evidence.version validated UTF-8"},
+	{declaration: "tpm_evidence.payload UTF-8 RFC-8785/JCS opaque JSON object", jcsPath: []string{"tpm_evidence", "payload"}},
+	{declaration: "agent_assertions zero-length when absent, otherwise UTF-8 RFC-8785/JCS complete object", jcsPath: []string{"agent_assertions"}},
+}
+
+// Canonical semantic field values of the authoritative metadata, read from the
+// controlled OpenAPI v0.1.5 source.
+const (
+	canonicalEvidenceIdentityVersion              = float64(1)
+	canonicalEvidenceIdentityAlgorithm            = "SHA-256"
+	canonicalEvidenceIdentityEncoding             = "ordered-domain-separated-uint32-big-endian-length-framed-components"
+	canonicalEvidenceIdentityUnsignedIntEncoding  = "minimal-big-endian-no-leading-zeroes; zero-is-00"
+	canonicalEvidenceIdentityJSONCanonicalization = "RFC-8785-JCS-for-identity-only"
+	canonicalEvidenceIdentityRetry                = "same persisted EvidenceIdentityV1 returns original committed 202; missing/corrupt identity is 503 DEPENDENCY_UNAVAILABLE"
+)
+
+var canonicalEvidenceIdentityExcludes = []string{
+	"EnrollmentAccessToken", "Authorization", "X-Correlation-ID", "server-clock",
+	"retry-counters", "transient-server-values", "client-provided-fingerprint",
+}
+
+// evidenceIdentityMetadata is the strongly typed semantic shape of the
+// authoritative x-evidence-identity extension. JSON tags mirror the controlled
+// source; unknown fields are rejected at parse time.
+type evidenceIdentityMetadata struct {
+	Version                 float64  `json:"version"`
+	Algorithm               string   `json:"algorithm"`
+	Encoding                string   `json:"encoding"`
+	UnsignedIntegerEncoding string   `json:"unsignedIntegerEncoding"`
+	Components              []string `json:"components"`
+	JSONCanonicalization    string   `json:"jsonCanonicalization"`
+	Excludes                []string `json:"excludes"`
+	Retry                   string   `json:"retry"`
+}
+
+// parseEvidenceIdentityMetadata converts the raw extension value into the
+// strongly typed semantic shape. A nil raw value means the extension is absent
+// and returns (nil, nil). Any structural/type ambiguity fails closed with an
+// error.
+func parseEvidenceIdentityMetadata(raw interface{}) (*evidenceIdentityMetadata, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("encoding metadata: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var meta evidenceIdentityMetadata
+	if err := dec.Decode(&meta); err != nil {
+		return nil, fmt.Errorf("decoding metadata: %w", err)
+	}
+	return &meta, nil
+}
+
+// isExactlyCanonical proves that the parsed metadata is the COMPLETE, exact
+// semantic declaration of the controlled EvidenceIdentityV1: every
+// authority-bearing field matches its canonical value, the component list
+// matches count, value and order exactly, and no unexpected component or
+// field is present. Partial matches are not sufficient.
+func (m *evidenceIdentityMetadata) isExactlyCanonical() bool {
+	if m == nil {
+		return false
+	}
+	if m.Version != canonicalEvidenceIdentityVersion {
+		return false
+	}
+	if m.Algorithm != canonicalEvidenceIdentityAlgorithm {
+		return false
+	}
+	if m.Encoding != canonicalEvidenceIdentityEncoding {
+		return false
+	}
+	if m.UnsignedIntegerEncoding != canonicalEvidenceIdentityUnsignedIntEncoding {
+		return false
+	}
+	if m.JSONCanonicalization != canonicalEvidenceIdentityJSONCanonicalization {
+		return false
+	}
+	if !slices.Equal(m.Components, canonicalEvidenceIdentityDeclarations()) {
+		return false
+	}
+	if !equalStringSets(m.Excludes, canonicalEvidenceIdentityExcludes) {
+		return false
+	}
+	if m.Retry != canonicalEvidenceIdentityRetry {
+		return false
+	}
+	return true
+}
+
+func canonicalEvidenceIdentityDeclarations() []string {
+	out := make([]string, len(canonicalEvidenceIdentityComponents))
+	for i, c := range canonicalEvidenceIdentityComponents {
+		out[i] = c.declaration
+	}
+	return out
+}
+
+// canonicalEvidenceIdentityJCSPaths returns the root-relative duplicate-
+// detection skip paths derived from the validated canonical component list
+// (the components whose jcsPath is non-nil). The skip authority is the same
+// single validated declaration source, never an independent hard-coded list.
+func canonicalEvidenceIdentityJCSPaths() [][]string {
+	var paths [][]string
+	for _, c := range canonicalEvidenceIdentityComponents {
+		if c.jcsPath != nil {
+			paths = append(paths, append([]string(nil), c.jcsPath...))
+		}
+	}
+	return paths
+}
+
+// equalStringSets compares two string lists as sets with exact multiplicity
+// (order-insensitive, duplicate-sensitive).
+func equalStringSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa := append([]string(nil), a...)
+	sb := append([]string(nil), b...)
+	sort.Strings(sa)
+	sort.Strings(sb)
+	return slices.Equal(sa, sb)
+}
+
+// deriveEvidenceSkipPaths validates, once at startup, the authoritative
+// x-evidence-identity extension on the evidence operation and records the
+// duplicate-detection skip paths to apply. Fail-safe semantics:
+//
+//   - operation absent: no skip paths (nothing to derive);
+//   - metadata absent: full M3 strict checking remains (no skip paths);
+//   - metadata present but not the COMPLETE exact canonical declaration
+//     (wrong shape/type/field/version/algorithm/encoding/canonicalization/
+//     component count/value/order/duplicates/extras): construction error —
+//     the API must not start with internally inconsistent authoritative
+//     metadata;
+//   - metadata exactly canonical: the skip paths are derived from the
+//     validated JCS-bearing component declarations.
+//
+// Metadata copied onto any OTHER operation never enables skip behavior: the
+// derivation only ever inspects the operation whose operationId is
+// submitEnrollmentEvidence, and the runtime lookup re-checks the operationId.
+func (e *Enforcer) deriveEvidenceSkipPaths(view *openapi3.T) error {
+	for _, pi := range view.Paths.Map() {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+			op := pi.GetOperation(method)
+			if op == nil || op.OperationID != evidenceOperationID {
+				continue
+			}
+			meta, err := parseEvidenceIdentityMetadata(op.Extensions["x-evidence-identity"])
+			if err != nil {
+				return fmt.Errorf("contract enforcement: malformed x-evidence-identity metadata on submitEnrollmentEvidence: %w", err)
+			}
+			if meta == nil {
+				// Missing metadata: retain full M3 strict checking.
+				return nil
+			}
+			if !meta.isExactlyCanonical() {
+				return errors.New("contract enforcement: x-evidence-identity metadata on submitEnrollmentEvidence is not the exact canonical EvidenceIdentityV1 declaration")
+			}
+			e.evidenceSkipPaths = canonicalEvidenceIdentityJCSPaths()
+			return nil
+		}
+	}
+	return nil
+}
+
+// evidenceOpaquePathsFor returns the pre-derived skip paths for the evidence
+// operation and nil for every other operation. The operationId check makes
+// copied metadata on another operation inert; the paths themselves were fixed
+// at startup, so no request value can influence skip-path selection.
+func (e *Enforcer) evidenceOpaquePathsFor(cop *compiledOperation) [][]string {
+	if cop == nil || cop.operation == nil || cop.operation.OperationID != evidenceOperationID {
+		return nil
+	}
+	return e.evidenceSkipPaths
 }
 
 func minInt64(a, b int64) int64 {

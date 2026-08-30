@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/getkin/kin-openapi v0.147.0
 	github.com/go-chi/chi/v5 v5.3.2
+	github.com/gowebpki/jcs v1.0.1
 	github.com/lestrrat-go/jwx/v3 v3.2.0
 	github.com/oapi-codegen/runtime v1.7.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2

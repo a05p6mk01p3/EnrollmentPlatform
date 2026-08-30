@@ -4,11 +4,11 @@
 
 For implementation work, use the following sources in this order:
 
-1. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.3.yaml`
+1. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.5.yaml`
    - executable HTTP/API contract
-2. `docs/Enrollment_Platform_Enrollment_Protocol_Specification_v0.2.4.docx`
+2. `docs/Enrollment_Platform_Enrollment_Protocol_Specification_v0.2.6.docx`
    - normative protocol semantics
-3. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.3_README.md`
+3. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.5_README.md`
    - implementation and contract notes
 
 Do not modify these controlled documents unless explicitly authorized.
@@ -119,7 +119,7 @@ Opaque authentication tokens use non-reversible server-side verifiers.
 
 For server-generated secrets returned by an originating response,
 the protocol permits only the temporary encrypted Idempotency Replay Capsule
-defined in Protocol v0.2.4.
+defined in Protocol v0.2.6.
 
 The replay capsule:
 
@@ -139,6 +139,18 @@ The replay capsule:
 - Permanent capsule loss is `409 IDEMPOTENCY_REPLAY_UNAVAILABLE`; transient protector failure is `503 DEPENDENCY_UNAVAILABLE`; fingerprint mismatch remains `409 IDEMPOTENCY_CONFLICT`.
 - M5.4 Reserve for secret-originator execution must be inside the transaction-bound Unit of Work. NEW alone consumes Temporary Principal quota; never freeze OPEN-009 DB mechanics or CG-003 quantitative TTLs.
 - M4 capability authentication remains read-only; credential issuance/verifier persistence and quota mutation are a separate lifecycle/write boundary.
+
+### Evidence resource idempotency (CR-M5.8-001)
+
+- `PUT /v1/enrollments/{id}/evidence` remains resource-idempotent and does not use `Idempotency-Key`.
+- Retry recognition is only after successful EnrollmentAccessToken authentication and exact enrollment resource binding. An expired or invalid EAT remains `401`; it has no retry-recovery path.
+- EvidenceIdentityV1 is the controlled protocol identity: it is domain-separated, length-framed, uses validated DER and exact JWS compact bytes, and uses RFC 8785/JCS only for opaque JSON identity bytes. It does not define TPM semantics.
+- A matching persisted EvidenceIdentityV1 returns the original committed `202` result without mutation, even if the challenge has since expired. A first unresolved expired submit is `410 RESOURCE_EXPIRED`; different evidence after acceptance is `409 STATE_CONFLICT`.
+- Duplicate names in identity-bearing JSON must be rejected before JCS. Missing or corrupt persisted identity must fail closed with `503 DEPENDENCY_UNAVAILABLE`.
+
+### Ordinary authentication before keyed replay (CR-M5.8-002)
+
+- Ordinary keyed idempotency replay requires successful ordinary authentication, exact resource binding and applicable authorization first; it never bypasses expired, invalid or revoked credentials. A committed result may be replayed after business/challenge freshness advances only while those ordinary checks succeed.
 
 ---
 
@@ -371,8 +383,8 @@ Report:
 
 If a requested implementation conflicts with:
 
-- OpenAPI v0.1.3;
-- Protocol v0.2.4;
+- OpenAPI v0.1.5;
+- Protocol v0.2.6;
 - an architecture invariant in this file;
 
 do not silently resolve the conflict.

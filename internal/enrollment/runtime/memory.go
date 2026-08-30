@@ -7,6 +7,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"time"
 
@@ -51,6 +52,7 @@ type MemoryStore struct {
 	enrollments      map[string]application.EnrollmentRecord
 	enrollmentAccess map[capability.VerifierKey]capability.EnrollmentAccessRecord
 	createResults    map[string]application.CreateResultSnapshot
+	refreshResults   map[string]application.ChallengeRefreshResult
 	idemActive       map[idempotencyruntime.EffectiveScope]*idemActiveRecord
 	idemCommitted    map[idempotencyruntime.EffectiveScope]*idempotencyruntime.Record
 	policies         map[policyKey]policyRecord
@@ -67,6 +69,7 @@ func NewMemoryStore(authority *preonboardingruntime.MemoryStore) (*MemoryStore, 
 		enrollments:      make(map[string]application.EnrollmentRecord),
 		enrollmentAccess: make(map[capability.VerifierKey]capability.EnrollmentAccessRecord),
 		createResults:    make(map[string]application.CreateResultSnapshot),
+		refreshResults:   make(map[string]application.ChallengeRefreshResult),
 		idemActive:       make(map[idempotencyruntime.EffectiveScope]*idemActiveRecord),
 		idemCommitted:    make(map[idempotencyruntime.EffectiveScope]*idempotencyruntime.Record),
 		policies:         make(map[policyKey]policyRecord),
@@ -107,6 +110,7 @@ func (s *MemoryStore) Begin(context.Context) (application.UnitOfWork, error) {
 		stagedEnrollments:      make(map[string]application.EnrollmentRecord),
 		stagedEnrollmentAccess: make(map[capability.VerifierKey]capability.EnrollmentAccessRecord),
 		stagedCreateResults:    make(map[string]application.CreateResultSnapshot),
+		stagedRefreshResults:   make(map[string]application.ChallengeRefreshResult),
 		stagedIdemCommits:      make(map[idempotencyruntime.EffectiveScope]*idempotencyruntime.Record),
 		stagedAudits:           make([]application.AuditEvent, 0),
 		activeTokens:           make(map[idempotencyruntime.ReservationToken]idempotencyruntime.EffectiveScope),
@@ -153,6 +157,13 @@ func (s *MemoryStore) CountCreateResults() int {
 	defer s.mu.RUnlock()
 	return len(s.createResults)
 }
+
+func (s *MemoryStore) CountRefreshResults() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.refreshResults)
+}
+
 func (s *MemoryStore) CountIdemCommitted() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -193,8 +204,13 @@ type memoryUOW struct {
 	stagedCreateResults    map[string]application.CreateResultSnapshot
 	stagedIdemCommits      map[idempotencyruntime.EffectiveScope]*idempotencyruntime.Record
 	stagedAudits           []application.AuditEvent
+	stagedRefreshResults   map[string]application.ChallengeRefreshResult
 	activeTokens           map[idempotencyruntime.ReservationToken]idempotencyruntime.EffectiveScope
 	policyReads            map[policyKey]policyRecord
+	continuationReadID     string
+	continuationRead       *application.EnrollmentRecord
+	stagedEvidence         *application.EvidenceAcceptanceWrite
+	stagedRefresh          *application.ChallengeRefreshWrite
 	closed                 bool
 }
 
@@ -220,6 +236,14 @@ func (u *memoryUOW) EvidenceRequirements() application.EvidenceRequirementsProvi
 func (u *memoryUOW) Audit() application.AuditWriter { return &memoryAuditWriter{uow: u} }
 func (u *memoryUOW) IdempotencyStore() idempotencyruntime.Store {
 	return &transactionalIdemStore{uow: u}
+}
+
+func (u *memoryUOW) EnrollmentContinuation() application.EnrollmentContinuationRepository {
+	return &memoryContinuationRepository{uow: u}
+}
+
+func (u *memoryUOW) RefreshResults() application.RefreshResultStore {
+	return &memoryRefreshResultStore{uow: u}
 }
 
 func (u *memoryUOW) ensureAuthority(requestID string) (preonboardingruntime.EnrollmentAuthoritySnapshot, bool, error) {
@@ -254,17 +278,25 @@ func (u *memoryUOW) Commit(ctx context.Context) error {
 		u.closed = true
 		return application.ErrDependencyUnavailable
 	}
-	if err := u.validateLocked(commitNow); err != nil {
+	var validationErr error
+	if u.stagedEvidence != nil || u.stagedRefresh != nil {
+		validationErr = u.validateContinuationLocked(commitNow)
+	} else {
+		validationErr = u.validateLocked(commitNow)
+	}
+	if validationErr != nil {
 		u.rollbackLocked()
 		u.closed = true
-		return err
+		return validationErr
 	}
 
 	// The authority transition is the first committed-state mutation and keeps
 	// the M5.6 authority lock held while the already-prevalidated local write-set
 	// is published. The callback cannot fail, so observers can never see
 	// RequestAccess=CONSUMED without the corresponding enrollment/result state.
-	if err := u.commitAuthorityAndPublish(commitNow); err != nil {
+	if u.stagedEvidence != nil || u.stagedRefresh != nil {
+		u.publishContinuationLocked()
+	} else if err := u.commitAuthorityAndPublish(commitNow); err != nil {
 		u.rollbackLocked()
 		u.closed = true
 		return err
@@ -464,7 +496,209 @@ func (u *memoryUOW) rollbackLocked() {
 	u.stagedCreateResults = nil
 	u.stagedIdemCommits = nil
 	u.stagedAudits = nil
+	u.stagedRefreshResults = nil
 	u.policyReads = nil
+	u.continuationRead = nil
+	u.stagedEvidence = nil
+	u.stagedRefresh = nil
+}
+
+// memoryContinuationRepository is the reference implementation of the M5.8
+// consistency port. Reads are retained as a compare-and-set read set; writes
+// are only published by memoryUOW.Commit while the store lock is held.
+type memoryContinuationRepository struct{ uow *memoryUOW }
+
+func (r *memoryContinuationRepository) GetEnrollment(ctx context.Context, id string) (application.EnrollmentRecord, bool, error) {
+	if r.uow.closed || id == "" {
+		return application.EnrollmentRecord{}, false, errors.New("enrollment runtime: invalid continuation lookup")
+	}
+	record, found, err := (&memoryEnrollmentRepository{uow: r.uow}).GetEnrollment(ctx, id)
+	if err != nil || !found {
+		return record, found, err
+	}
+	if r.uow.continuationReadID != "" && r.uow.continuationReadID != id {
+		return application.EnrollmentRecord{}, false, errors.New("enrollment runtime: continuation transaction bound to another enrollment")
+	}
+	if r.uow.continuationRead == nil {
+		cp := cloneEnrollmentRecord(record)
+		r.uow.continuationReadID = id
+		r.uow.continuationRead = &cp
+	}
+	return cloneEnrollmentRecord(record), true, nil
+}
+
+func (r *memoryContinuationRepository) StageEvidenceAcceptance(_ context.Context, write application.EvidenceAcceptanceWrite) error {
+	if r.uow.closed || r.uow.stagedEvidence != nil || r.uow.stagedRefresh != nil || write.EnrollmentID == "" {
+		return errors.New("enrollment runtime: invalid evidence stage")
+	}
+	if write.ExpectedChallengeVersion < 1 || write.AcceptedAt.IsZero() || write.Evidence.Validate() != nil ||
+		write.Evidence.AcceptedAt != write.AcceptedAt || write.Evidence.ChallengeVersion != write.ExpectedChallengeVersion {
+		return errors.New("enrollment runtime: malformed evidence stage")
+	}
+	record, found, err := r.GetEnrollment(context.Background(), write.EnrollmentID)
+	if err != nil || !found {
+		return errors.New("enrollment runtime: evidence enrollment unavailable")
+	}
+	if record.Aggregate.State() != domain.StateChallengeIssued || record.Challenge.ChallengeVersion != write.ExpectedChallengeVersion || record.AcceptedEvidence != nil {
+		return application.ErrStateConflict
+	}
+	updated := cloneEnrollmentRecord(record)
+	aggregate, err := domain.RestoreEnrollment(updated.Aggregate.ID(), updated.Aggregate.State())
+	if err != nil {
+		return errors.New("enrollment runtime: evidence aggregate restore failed")
+	}
+	if err := aggregate.AcceptEvidence(); err != nil {
+		return application.ErrStateConflict
+	}
+	updated.Aggregate = aggregate
+	evidence := write.Evidence.Clone()
+	updated.AcceptedEvidence = &evidence
+	updated.UpdatedAt = write.AcceptedAt
+	r.uow.stagedEnrollments[write.EnrollmentID] = updated
+	cp := write
+	cp.Evidence = write.Evidence.Clone()
+	r.uow.stagedEvidence = &cp
+	r.uow.stagedAudits = append(r.uow.stagedAudits, application.AuditEvent{
+		Type: application.AuditEventEvidenceAccepted, EnrollmentID: write.EnrollmentID,
+		DeviceID: record.DeviceID, Operation: record.Operation, CertificateUsage: record.CertificateUsage,
+		Timestamp: write.AcceptedAt,
+	})
+	return nil
+}
+
+func (r *memoryContinuationRepository) StageChallengeRefresh(_ context.Context, write application.ChallengeRefreshWrite) error {
+	if r.uow.closed || r.uow.stagedEvidence != nil || r.uow.stagedRefresh != nil || write.EnrollmentID == "" {
+		return errors.New("enrollment runtime: invalid challenge refresh stage")
+	}
+	if write.ExpectedChallengeVersion < 1 || write.RefreshedAt.IsZero() || write.Challenge.Validate(write.RefreshedAt) != nil ||
+		write.Challenge.ChallengeVersion != write.ExpectedChallengeVersion+1 {
+		return errors.New("enrollment runtime: malformed challenge refresh stage")
+	}
+	record, found, err := r.GetEnrollment(context.Background(), write.EnrollmentID)
+	if err != nil || !found {
+		return errors.New("enrollment runtime: refresh enrollment unavailable")
+	}
+	if record.Aggregate.State() != domain.StateChallengeIssued || record.Challenge.ChallengeVersion != write.ExpectedChallengeVersion || record.AcceptedEvidence != nil {
+		return application.ErrStateConflict
+	}
+	updated := cloneEnrollmentRecord(record)
+	updated.Challenge = write.Challenge
+	updated.UpdatedAt = write.RefreshedAt
+	r.uow.stagedEnrollments[write.EnrollmentID] = updated
+	cp := write
+	r.uow.stagedRefresh = &cp
+	r.uow.stagedAudits = append(r.uow.stagedAudits, application.AuditEvent{
+		Type: application.AuditEventChallengeRefreshed, EnrollmentID: write.EnrollmentID,
+		DeviceID: record.DeviceID, Operation: record.Operation, CertificateUsage: record.CertificateUsage,
+		Timestamp: write.RefreshedAt,
+	})
+	return nil
+}
+
+type memoryRefreshResultStore struct{ uow *memoryUOW }
+
+func (s *memoryRefreshResultStore) SaveChallengeRefreshResult(_ context.Context, loc idempotencyruntime.ResultLocator, result application.ChallengeRefreshResult) error {
+	if s.uow.closed || loc.IsZero() || result.Validate(result.RefreshedAt) != nil {
+		return errors.New("enrollment runtime: invalid challenge refresh result")
+	}
+	if _, exists := s.uow.stagedRefreshResults[loc.String()]; exists {
+		return errors.New("enrollment runtime: duplicate staged challenge refresh result")
+	}
+	s.uow.store.mu.RLock()
+	_, exists := s.uow.store.refreshResults[loc.String()]
+	s.uow.store.mu.RUnlock()
+	if exists {
+		return errors.New("enrollment runtime: duplicate challenge refresh result")
+	}
+	s.uow.stagedRefreshResults[loc.String()] = result.Clone()
+	return nil
+}
+
+func (s *memoryRefreshResultStore) GetChallengeRefreshResult(_ context.Context, loc idempotencyruntime.ResultLocator) (application.ChallengeRefreshResult, bool, error) {
+	if result, ok := s.uow.stagedRefreshResults[loc.String()]; ok {
+		return result.Clone(), true, nil
+	}
+	s.uow.store.mu.RLock()
+	result, ok := s.uow.store.refreshResults[loc.String()]
+	s.uow.store.mu.RUnlock()
+	return result.Clone(), ok, nil
+}
+
+func (u *memoryUOW) validateContinuationLocked(now time.Time) error {
+	if u.continuationRead == nil || u.continuationReadID == "" || len(u.stagedEnrollments) != 1 || len(u.stagedAudits) != 1 {
+		return application.ErrDependencyUnavailable
+	}
+	current, ok := u.store.enrollments[u.continuationReadID]
+	if !ok || !reflect.DeepEqual(current, *u.continuationRead) {
+		return application.ErrStateConflict
+	}
+	updated, ok := u.stagedEnrollments[u.continuationReadID]
+	if !ok || updated.Validate() != nil {
+		return application.ErrDependencyUnavailable
+	}
+	if u.stagedEvidence != nil {
+		write := u.stagedEvidence
+		if u.stagedRefresh != nil || len(u.stagedRefreshResults) != 0 || write.EnrollmentID != u.continuationReadID ||
+			current.Aggregate.State() != domain.StateChallengeIssued || current.AcceptedEvidence != nil ||
+			current.Challenge.ChallengeVersion != write.ExpectedChallengeVersion ||
+			updated.Aggregate.State() != domain.StateEvidenceReceived || updated.AcceptedEvidence == nil ||
+			!updated.AcceptedEvidence.Fingerprint.Equal(write.Evidence.Fingerprint) {
+			return application.ErrStateConflict
+		}
+		if !now.Before(current.Challenge.ExpiresAt) {
+			return application.ErrResourceExpired
+		}
+	} else if u.stagedRefresh != nil {
+		write := u.stagedRefresh
+		if len(u.stagedRefreshResults) != 1 || write.EnrollmentID != u.continuationReadID ||
+			current.Aggregate.State() != domain.StateChallengeIssued || current.AcceptedEvidence != nil ||
+			current.Challenge.ChallengeVersion != write.ExpectedChallengeVersion ||
+			updated.Aggregate.State() != domain.StateChallengeIssued || updated.AcceptedEvidence != nil ||
+			updated.Challenge.ChallengeVersion != write.ExpectedChallengeVersion+1 ||
+			updated.Challenge.Nonce == current.Challenge.Nonce || !now.Before(updated.Challenge.ExpiresAt) {
+			return application.ErrStateConflict
+		}
+		for _, result := range u.stagedRefreshResults {
+			if result.EnrollmentID != write.EnrollmentID || result.Challenge != updated.Challenge || result.Validate(now) != nil {
+				return application.ErrDependencyUnavailable
+			}
+		}
+		if len(u.stagedIdemCommits) != 1 {
+			return application.ErrDependencyUnavailable
+		}
+		for scope, record := range u.stagedIdemCommits {
+			if record == nil || record.Scope != scope || record.Status != idempotencyruntime.RecordCommitted || record.Result.IsZero() ||
+				record.Fingerprint.IsZero() || !now.Before(record.ExpiresAt) || record.Capsule != nil ||
+				scope.Credential().Kind() != authpolicy.CredentialKindEnrollmentAccessToken || scope.Method() != "POST" ||
+				scope.Route() != application.ChallengeRefreshRoute {
+				return application.ErrDependencyUnavailable
+			}
+			if _, exists := u.stagedRefreshResults[record.Result.String()]; !exists {
+				return application.ErrDependencyUnavailable
+			}
+			active, exists := u.store.idemActive[scope]
+			if !exists || active == nil || !active.fingerprint.Equal(record.Fingerprint) || !u.ownsActiveReservation(scope, active.token) {
+				return application.ErrDependencyUnavailable
+			}
+		}
+	} else {
+		return application.ErrDependencyUnavailable
+	}
+	return nil
+}
+
+func (u *memoryUOW) publishContinuationLocked() {
+	for id, record := range u.stagedEnrollments {
+		u.store.enrollments[id] = cloneEnrollmentRecord(record)
+	}
+	for loc, result := range u.stagedRefreshResults {
+		u.store.refreshResults[loc] = result.Clone()
+	}
+	for scope, record := range u.stagedIdemCommits {
+		u.store.idemCommitted[scope] = cloneIdemRecord(record)
+		delete(u.store.idemActive, scope)
+	}
+	u.store.audits = append(u.store.audits, u.stagedAudits...)
 }
 
 type memoryPreOnboardingReader struct{ uow *memoryUOW }
@@ -738,6 +972,10 @@ func clonePreOnboardingRequest(req *preonboardingdomain.PreOnboardingRequest) *p
 func cloneEnrollmentRecord(rec application.EnrollmentRecord) application.EnrollmentRecord {
 	out := rec
 	out.EvidenceRequirements = rec.EvidenceRequirements.Clone()
+	if rec.AcceptedEvidence != nil {
+		evidence := rec.AcceptedEvidence.Clone()
+		out.AcceptedEvidence = &evidence
+	}
 	if rec.Aggregate != nil {
 		agg, err := domain.RestoreEnrollment(rec.Aggregate.ID(), rec.Aggregate.State())
 		if err == nil {
@@ -773,3 +1011,4 @@ func cloneIdemRecord(in *idempotencyruntime.Record) *idempotencyruntime.Record {
 var _ application.UnitOfWorkManager = (*MemoryStore)(nil)
 var _ capability.Store = (*MemoryStore)(nil)
 var _ application.UnitOfWork = (*memoryUOW)(nil)
+var _ application.ContinuationUnitOfWork = (*memoryUOW)(nil)

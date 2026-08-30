@@ -9,6 +9,7 @@ import (
 	"time"
 
 	domain "github.com/a05p6mk01p3/EnrollmentPlatform/internal/domain/enrollment"
+	idempotencyruntime "github.com/a05p6mk01p3/EnrollmentPlatform/internal/idempotency/runtime"
 )
 
 const (
@@ -39,14 +40,47 @@ func (c Challenge) Validate(now time.Time) error {
 	if err != nil || len(nonce) < 16 {
 		return errors.New("enrollment application: challenge nonce must encode at least 128 bits")
 	}
-	if c.ChallengeVersion != 1 {
-		return errors.New("enrollment application: initial challenge_version must be 1")
+	if c.ChallengeVersion < 1 {
+		return errors.New("enrollment application: challenge_version must be positive")
 	}
 	if !c.ExpiresAt.After(now) {
 		return errors.New("enrollment application: challenge expiry must be after creation time")
 	}
 	if c.PopFormat != PopFormatEnrollmentJWS {
 		return errors.New("enrollment application: unsupported challenge pop format")
+	}
+	return nil
+}
+
+// AcceptedEvidence is the immutable, server-owned record of evidence accepted
+// for one challenge. Representation is an opaque, already-admitted encoding;
+// OPEN-004A deliberately does not define its wire format in this milestone.
+// Fingerprint is supplied by the trusted admission boundary and is compared
+// byte-for-byte for resource-idempotent retries.
+type AcceptedEvidence struct {
+	Fingerprint      idempotencyruntime.Fingerprint
+	ChallengeVersion int
+	Representation   []byte
+	AcceptedAt       time.Time
+}
+
+func (e AcceptedEvidence) Clone() AcceptedEvidence {
+	e.Representation = append([]byte(nil), e.Representation...)
+	return e
+}
+
+func (e AcceptedEvidence) Validate() error {
+	if e.Fingerprint.IsZero() {
+		return errors.New("enrollment application: accepted evidence fingerprint is required")
+	}
+	if e.ChallengeVersion < 1 {
+		return errors.New("enrollment application: accepted evidence challenge_version must be positive")
+	}
+	if len(e.Representation) == 0 {
+		return errors.New("enrollment application: accepted evidence representation is required")
+	}
+	if e.AcceptedAt.IsZero() {
+		return errors.New("enrollment application: accepted evidence accepted_at is required")
 	}
 	return nil
 }
@@ -102,8 +136,11 @@ type EnrollmentRecord struct {
 	PartnerID            string
 	Operation            string
 	CertificateUsage     string
+	AssuranceLevel       string
+	CertificateID        string
 	Challenge            Challenge
 	EvidenceRequirements EvidenceRequirements
+	AcceptedEvidence     *AcceptedEvidence
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }
@@ -112,8 +149,8 @@ func (r EnrollmentRecord) Validate() error {
 	if r.Aggregate == nil || r.Aggregate.ID() == "" {
 		return errors.New("enrollment application: enrollment aggregate/id is required")
 	}
-	if r.Aggregate.State() != domain.StateChallengeIssued {
-		return errors.New("enrollment application: initial enrollment must be CHALLENGE_ISSUED")
+	if !r.Aggregate.State().Valid() {
+		return errors.New("enrollment application: enrollment state is invalid")
 	}
 	if strings.TrimSpace(r.DeviceID) == "" || strings.TrimSpace(r.PartnerID) == "" {
 		return errors.New("enrollment application: authoritative device and partner bindings are required")
@@ -124,11 +161,67 @@ func (r EnrollmentRecord) Validate() error {
 	if strings.TrimSpace(r.CertificateUsage) == "" {
 		return errors.New("enrollment application: certificate usage is required")
 	}
-	if r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() || !r.CreatedAt.Equal(r.UpdatedAt) {
-		return errors.New("enrollment application: initial created_at and updated_at must be equal and non-zero")
+	if r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() || r.UpdatedAt.Before(r.CreatedAt) {
+		return errors.New("enrollment application: created_at/updated_at must be ordered and non-zero")
 	}
 	if err := r.Challenge.Validate(r.CreatedAt); err != nil {
 		return err
 	}
-	return r.EvidenceRequirements.Validate()
+	if err := r.EvidenceRequirements.Validate(); err != nil {
+		return err
+	}
+	if r.AcceptedEvidence != nil {
+		if err := r.AcceptedEvidence.Validate(); err != nil {
+			return err
+		}
+		if r.AcceptedEvidence.ChallengeVersion != r.Challenge.ChallengeVersion {
+			return errors.New("enrollment application: accepted evidence challenge version does not match active record")
+		}
+	}
+	return nil
+}
+
+// EnrollmentSnapshot is an immutable read representation. It contains no
+// correlation identifier and no mutable aggregate pointer.
+type EnrollmentSnapshot struct {
+	EnrollmentID         string
+	DeviceID             string
+	Operation            string
+	CertificateUsage     string
+	AssuranceLevel       string
+	CertificateID        string
+	State                domain.State
+	Challenge            *Challenge
+	EvidenceRequirements EvidenceRequirements
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+func (s EnrollmentSnapshot) Clone() EnrollmentSnapshot {
+	s.EvidenceRequirements = s.EvidenceRequirements.Clone()
+	if s.Challenge != nil {
+		challenge := *s.Challenge
+		s.Challenge = &challenge
+	}
+	return s
+}
+
+func (r EnrollmentRecord) Snapshot() EnrollmentSnapshot {
+	s := EnrollmentSnapshot{
+		DeviceID:             r.DeviceID,
+		Operation:            r.Operation,
+		CertificateUsage:     r.CertificateUsage,
+		AssuranceLevel:       r.AssuranceLevel,
+		CertificateID:        r.CertificateID,
+		EvidenceRequirements: r.EvidenceRequirements.Clone(),
+		CreatedAt:            r.CreatedAt,
+		UpdatedAt:            r.UpdatedAt,
+	}
+	if r.Aggregate != nil {
+		s.EnrollmentID = string(r.Aggregate.ID())
+		s.State = r.Aggregate.State()
+	}
+	challenge := r.Challenge
+	s.Challenge = &challenge
+	return s
 }

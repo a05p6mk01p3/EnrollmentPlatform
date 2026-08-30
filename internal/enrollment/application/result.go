@@ -63,3 +63,44 @@ type CreateInitialResult struct {
 	EnrollmentAccessToken string
 	Replay                bool
 }
+
+// EvidenceAcceptedResult is the stable 202 result for both the first
+// resource acceptance and an exact retry. It contains no request material.
+type EvidenceAcceptedResult struct {
+	EnrollmentID      string
+	State             domain.State
+	StatusURL         string
+	RetryAfterSeconds int
+	Replay            bool
+}
+
+func (r EvidenceAcceptedResult) Validate() error {
+	if strings.TrimSpace(r.EnrollmentID) == "" || r.State != domain.StateEvidenceReceived {
+		return errors.New("enrollment application: invalid evidence accepted result")
+	}
+	if r.StatusURL != "/v1/enrollments/"+r.EnrollmentID || r.RetryAfterSeconds < 0 {
+		return errors.New("enrollment application: invalid evidence status result")
+	}
+	return nil
+}
+
+// ChallengeRefreshResult is the immutable committed 200 representation for a
+// challenge refresh. Replays return this exact snapshot and do not mint a
+// replacement nonce.
+type ChallengeRefreshResult struct {
+	EnrollmentID string
+	State        domain.State
+	Challenge    Challenge
+	RefreshedAt  time.Time
+}
+
+func (r ChallengeRefreshResult) Clone() ChallengeRefreshResult {
+	return r
+}
+
+func (r ChallengeRefreshResult) Validate(_ time.Time) error {
+	if strings.TrimSpace(r.EnrollmentID) == "" || r.State != domain.StateChallengeIssued || r.RefreshedAt.IsZero() {
+		return errors.New("enrollment application: invalid challenge refresh result")
+	}
+	return r.Challenge.Validate(r.RefreshedAt)
+}

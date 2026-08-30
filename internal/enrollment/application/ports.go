@@ -50,6 +50,39 @@ type EnrollmentRepository interface {
 	GetEnrollment(ctx context.Context, id string) (EnrollmentRecord, bool, error)
 }
 
+// EnrollmentContinuationRepository is the shared consistency boundary for
+// evidence acceptance and challenge refresh. Implementations must record the
+// enrollment snapshot read by a UoW and validate the expected state,
+// challenge_version and active challenge again at Commit. Neither operation
+// may publish a partial write.
+type EnrollmentContinuationRepository interface {
+	GetEnrollment(ctx context.Context, id string) (EnrollmentRecord, bool, error)
+	StageEvidenceAcceptance(ctx context.Context, write EvidenceAcceptanceWrite) error
+	StageChallengeRefresh(ctx context.Context, write ChallengeRefreshWrite) error
+}
+
+type EvidenceAcceptanceWrite struct {
+	EnrollmentID             string
+	ExpectedChallengeVersion int
+	Evidence                 AcceptedEvidence
+	AcceptedAt               time.Time
+}
+
+type ChallengeRefreshWrite struct {
+	EnrollmentID             string
+	ExpectedChallengeVersion int
+	Challenge                Challenge
+	RefreshedAt              time.Time
+}
+
+// RefreshResultStore stores only the deterministic non-secret result needed
+// for idempotent refresh replay. The challenge nonce is returned by the
+// originating response but is not an authentication token.
+type RefreshResultStore interface {
+	SaveChallengeRefreshResult(ctx context.Context, loc idempotencyruntime.ResultLocator, result ChallengeRefreshResult) error
+	GetChallengeRefreshResult(ctx context.Context, loc idempotencyruntime.ResultLocator) (ChallengeRefreshResult, bool, error)
+}
+
 // EnrollmentAccessWriter stages the non-reversible authentication verifier for
 // the newly-originated EnrollmentAccessToken.
 type EnrollmentAccessWriter interface {
@@ -102,6 +135,17 @@ type UnitOfWork interface {
 
 type UnitOfWorkManager interface {
 	Begin(ctx context.Context) (UnitOfWork, error)
+}
+
+// ContinuationUnitOfWork is an optional extension of UnitOfWork used by M5.8.
+// It is deliberately separate so existing M5.7 originator test doubles cannot
+// accidentally claim the stronger evidence/refresh consistency contract.
+type ContinuationUnitOfWork interface {
+	EnrollmentContinuation() EnrollmentContinuationRepository
+	RefreshResults() RefreshResultStore
+	IdempotencyStore() idempotencyruntime.Store
+	Commit(ctx context.Context) error
+	Rollback(ctx context.Context) error
 }
 
 // IDGenerator, ChallengeGenerator and TokenGenerator are generation seams.

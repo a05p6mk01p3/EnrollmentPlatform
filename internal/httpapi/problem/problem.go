@@ -28,6 +28,7 @@ const (
 	TypeIdempotencyConflict          = "https://pki.example/errors/idempotency-conflict"
 	TypeIdempotencyReplayUnavailable = "https://pki.example/errors/idempotency-replay-unavailable"
 	TypePreconditionFailed           = "https://pki.example/errors/precondition-failed"
+	TypeEvidenceInvalid              = "https://pki.example/errors/evidence-invalid"
 	TypeDependencyUnavailable        = "https://pki.example/errors/dependency-unavailable"
 	// TypeInternalError is infrastructure-only (server bug); it is not a
 	// contract machine code and must not be relied upon by clients.

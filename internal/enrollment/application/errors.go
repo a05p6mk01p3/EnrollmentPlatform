@@ -26,6 +26,21 @@ var (
 	// ErrIdempotencyReplayUnavailable maps to the contracted permanent 409
 	// IDEMPOTENCY_REPLAY_UNAVAILABLE recovery posture.
 	ErrIdempotencyReplayUnavailable = errors.New("enrollment application: idempotency replay unavailable")
+
+	// ErrStateConflict is returned when the authoritative enrollment/challenge
+	// changed before this operation reached its commit boundary.
+	ErrStateConflict = errors.New("enrollment application: enrollment state conflict")
+
+	// ErrEvidenceConflict is returned when an already accepted evidence resource
+	// is submitted again with a different trusted request fingerprint.
+	ErrEvidenceConflict = errors.New("enrollment application: evidence conflict")
+
+	// ErrEvidenceInvalid maps to the contracted 422 EVIDENCE_INVALID.
+	ErrEvidenceInvalid = errors.New("enrollment application: evidence invalid")
+
+	// ErrEnrollmentNotFound preserves the controlled 404 outcome for the later
+	// HTTP adapter; repository/dependency failures use ErrDependencyUnavailable.
+	ErrEnrollmentNotFound = errors.New("enrollment application: enrollment not found")
 )
 
 // InProgressError is an internal coordination outcome. It is intentionally not

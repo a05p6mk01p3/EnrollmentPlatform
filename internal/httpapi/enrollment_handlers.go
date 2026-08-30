@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -80,6 +81,75 @@ func (d *enrollmentDecorator) CreateEnrollment(ctx context.Context, request open
 		// M3 schema validation should make this unreachable.
 		return createEnrollment503(ctx), nil
 	}
+}
+
+// GetEnrollment executes the authenticated public read of an enrollment transaction.
+func (d *enrollmentDecorator) GetEnrollment(ctx context.Context, request openapi.GetEnrollmentRequestObject) (openapi.GetEnrollmentResponseObject, error) {
+	result, err := d.service.GetEnrollment(ctx, enrollmentapp.GetEnrollmentCommand{
+		EnrollmentID: string(request.Id),
+	})
+	return mapGetEnrollmentResult(ctx, result, err), nil
+}
+
+// SubmitEnrollmentEvidence executes the resource-idempotent evidence acceptance flow.
+func (d *enrollmentDecorator) SubmitEnrollmentEvidence(ctx context.Context, request openapi.SubmitEnrollmentEvidenceRequestObject) (openapi.SubmitEnrollmentEvidenceResponseObject, error) {
+	if request.Body == nil {
+		return submitEvidence400(ctx), nil
+	}
+	body := request.Body
+
+	// Use the raw identity-bearing JSON bytes preserved by the ingress
+	// middleware. Reconstructing the opaque payload via json.Marshal of the
+	// generated map would destroy duplicate members and original numeric
+	// lexical form before the duplicate detector and RFC 8785/JCS run.
+	raw, ok := rawEvidenceFrom(ctx)
+	if !ok || raw == nil || len(raw.tpmPayload) == 0 {
+		// The raw capture middleware must have run for this route. Its absence
+		// is a boundary-integrity failure, so fail closed.
+		return submitEvidence503(ctx), nil
+	}
+
+	cmd := enrollmentapp.EvidenceSubmissionCommand{
+		EnrollmentID:     string(request.Id),
+		ChallengeVersion: body.ChallengeVersion,
+		CsrDerBase64:     base64.StdEncoding.EncodeToString(body.CsrDerBase64),
+		PopFormat:        string(body.Pop.Format),
+		PopJWS:           body.Pop.Jws,
+		TpmFormat:        string(body.TpmEvidence.Format),
+		TpmVersion:       body.TpmEvidence.Version,
+		TpmPayload:       raw.tpmPayload,
+		AgentAssertions:  raw.agentAssertions,
+	}
+
+	result, err := d.service.SubmitEvidence(ctx, cmd)
+	return mapSubmitEvidenceResult(ctx, result, err), nil
+}
+
+// RefreshEnrollmentChallenge executes active enrollment challenge refresh.
+func (d *enrollmentDecorator) RefreshEnrollmentChallenge(ctx context.Context, request openapi.RefreshEnrollmentChallengeRequestObject) (openapi.RefreshEnrollmentChallengeResponseObject, error) {
+	if request.Body == nil || request.Params.IdempotencyKey == "" {
+		return refreshChallenge400(ctx), nil
+	}
+	ac, ok := authruntime.AuthenticationContextFrom(ctx)
+	if !ok || ac == nil || !ac.Has(authpolicy.CredentialKindEnrollmentAccessToken) {
+		return refreshChallenge503(ctx), nil
+	}
+	binding, ok := ac.Binding(authpolicy.CredentialKindEnrollmentAccessToken)
+	if !ok {
+		return refreshChallenge503(ctx), nil
+	}
+	enrollmentAccess, ok := binding.EnrollmentAccess()
+	if !ok || enrollmentAccess.EnrollmentID == "" {
+		return refreshChallenge503(ctx), nil
+	}
+
+	result, err := d.service.RefreshChallenge(ctx, enrollmentapp.RefreshChallengeCommand{
+		EnrollmentID:             string(request.Id),
+		CredentialBinding:        enrollmentAccess.EnrollmentID,
+		IdempotencyKey:           string(request.Params.IdempotencyKey),
+		ExpectedChallengeVersion: request.Body.ExpectedChallengeVersion,
+	})
+	return mapRefreshChallengeResult(ctx, result, err), nil
 }
 
 // enrollmentRecoveryMiddleware is an outer fallback around the normal M4 ->
@@ -305,6 +375,263 @@ func createEnrollment410(ctx context.Context) openapi.CreateEnrollmentResponseOb
 
 func createEnrollment503(ctx context.Context) openapi.CreateEnrollmentResponseObject {
 	return openapi.CreateEnrollment503ApplicationProblemPlusJSONResponse{
+		ServiceUnavailableApplicationProblemPlusJSONResponse: openapi.ServiceUnavailableApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", problem.TypeDependencyUnavailable, "Dependency unavailable", true),
+			Headers: openapi.ServiceUnavailableResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func mapGetEnrollmentResult(ctx context.Context, result enrollmentapp.GetEnrollmentResult, err error) openapi.GetEnrollmentResponseObject {
+	if err == nil {
+		return getEnrollment200(ctx, result.Snapshot)
+	}
+	switch {
+	case errors.Is(err, enrollmentapp.ErrEnrollmentNotFound):
+		return getEnrollment404(ctx)
+	case errors.Is(err, enrollmentapp.ErrResourceExpired):
+		return getEnrollment410(ctx)
+	default:
+		return getEnrollment503(ctx)
+	}
+}
+
+func getEnrollment200(ctx context.Context, s enrollmentapp.EnrollmentSnapshot) openapi.GetEnrollmentResponseObject {
+	resp := openapi.Enrollment{
+		EnrollmentId:     openapi.ResourceId(s.EnrollmentID),
+		DeviceId:         openapi.ResourceId(s.DeviceID),
+		Operation:        openapi.EnrollmentOperationResponse(s.Operation),
+		CertificateUsage: s.CertificateUsage,
+		State:            openapi.EnrollmentStateResponse(s.State),
+		CreatedAt:        s.CreatedAt,
+		UpdatedAt:        s.UpdatedAt,
+	}
+	if s.AssuranceLevel != "" {
+		al := openapi.AssuranceLevelResponse(s.AssuranceLevel)
+		resp.AssuranceLevel = &al
+	}
+	if s.CertificateID != "" {
+		cid := openapi.ResourceId(s.CertificateID)
+		resp.CertificateId = &cid
+	}
+	if s.Challenge != nil {
+		resp.Challenge = &openapi.Challenge{
+			Nonce:            openapi.Base64Url(s.Challenge.Nonce),
+			ChallengeVersion: s.Challenge.ChallengeVersion,
+			ExpiresAt:        s.Challenge.ExpiresAt,
+			PopFormat:        openapi.ChallengePopFormatEnrollmentPopJws,
+		}
+	}
+	return openapi.GetEnrollment200JSONResponse{
+		Body: resp,
+		Headers: openapi.GetEnrollment200ResponseHeaders{
+			XCorrelationID: correlationPtr(ctx),
+		},
+	}
+}
+
+func getEnrollment404(ctx context.Context) openapi.GetEnrollmentResponseObject {
+	return openapi.GetEnrollment404ApplicationProblemPlusJSONResponse{
+		NotFoundApplicationProblemPlusJSONResponse: openapi.NotFoundApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusNotFound, "RESOURCE_NOT_FOUND", problem.TypeResourceNotFound, "Resource not found", false),
+			Headers: openapi.NotFoundResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func getEnrollment410(ctx context.Context) openapi.GetEnrollmentResponseObject {
+	return openapi.GetEnrollment410ApplicationProblemPlusJSONResponse{
+		GoneApplicationProblemPlusJSONResponse: openapi.GoneApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusGone, "RESOURCE_EXPIRED", problem.TypeResourceExpired, "Resource expired", false),
+			Headers: openapi.GoneResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func getEnrollment503(ctx context.Context) openapi.GetEnrollmentResponseObject {
+	return openapi.GetEnrollment503ApplicationProblemPlusJSONResponse{
+		ServiceUnavailableApplicationProblemPlusJSONResponse: openapi.ServiceUnavailableApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", problem.TypeDependencyUnavailable, "Dependency unavailable", true),
+			Headers: openapi.ServiceUnavailableResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func mapSubmitEvidenceResult(ctx context.Context, result enrollmentapp.EvidenceAcceptedResult, err error) openapi.SubmitEnrollmentEvidenceResponseObject {
+	if err == nil {
+		return submitEvidence202(ctx, result)
+	}
+	switch {
+	case errors.Is(err, enrollmentapp.ErrEvidenceInvalid):
+		return submitEvidence422(ctx, "Evidence invalid")
+	case errors.Is(err, enrollmentapp.ErrEnrollmentNotFound):
+		return submitEvidence404(ctx)
+	case errors.Is(err, enrollmentapp.ErrStateConflict), errors.Is(err, enrollmentapp.ErrEvidenceConflict):
+		return submitEvidence409(ctx)
+	case errors.Is(err, enrollmentapp.ErrResourceExpired):
+		return submitEvidence410(ctx)
+	default:
+		return submitEvidence503(ctx)
+	}
+}
+
+func submitEvidence202(ctx context.Context, result enrollmentapp.EvidenceAcceptedResult) openapi.SubmitEnrollmentEvidenceResponseObject {
+	return openapi.SubmitEnrollmentEvidence202JSONResponse{
+		Body: openapi.EvidenceAcceptedResponse{
+			EnrollmentId:      openapi.ResourceId(result.EnrollmentID),
+			State:             openapi.EVIDENCERECEIVED,
+			StatusUrl:         result.StatusURL,
+			RetryAfterSeconds: result.RetryAfterSeconds,
+		},
+		Headers: openapi.SubmitEnrollmentEvidence202ResponseHeaders{
+			XCorrelationID: correlationPtr(ctx),
+		},
+	}
+}
+
+func submitEvidence400(ctx context.Context) openapi.SubmitEnrollmentEvidenceResponseObject {
+	return openapi.SubmitEnrollmentEvidence400ApplicationProblemPlusJSONResponse{
+		BadRequestApplicationProblemPlusJSONResponse: openapi.BadRequestApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusBadRequest, "INVALID_REQUEST", problem.TypeInvalidRequest, "Invalid request", false),
+			Headers: openapi.BadRequestResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func submitEvidence404(ctx context.Context) openapi.SubmitEnrollmentEvidenceResponseObject {
+	return openapi.SubmitEnrollmentEvidence404ApplicationProblemPlusJSONResponse{
+		NotFoundApplicationProblemPlusJSONResponse: openapi.NotFoundApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusNotFound, "RESOURCE_NOT_FOUND", problem.TypeResourceNotFound, "Resource not found", false),
+			Headers: openapi.NotFoundResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func submitEvidence409(ctx context.Context) openapi.SubmitEnrollmentEvidenceResponseObject {
+	return openapi.SubmitEnrollmentEvidence409ApplicationProblemPlusJSONResponse{
+		ConflictApplicationProblemPlusJSONResponse: openapi.ConflictApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusConflict, "STATE_CONFLICT", problem.TypeStateConflict, "State conflict", false),
+			Headers: openapi.ConflictResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func submitEvidence410(ctx context.Context) openapi.SubmitEnrollmentEvidenceResponseObject {
+	return openapi.SubmitEnrollmentEvidence410ApplicationProblemPlusJSONResponse{
+		GoneApplicationProblemPlusJSONResponse: openapi.GoneApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusGone, "RESOURCE_EXPIRED", problem.TypeResourceExpired, "Resource expired", false),
+			Headers: openapi.GoneResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func submitEvidence422(ctx context.Context, detail string) openapi.SubmitEnrollmentEvidenceResponseObject {
+	return openapi.SubmitEnrollmentEvidence422ApplicationProblemPlusJSONResponse{
+		UnprocessableEvidenceApplicationProblemPlusJSONResponse: openapi.UnprocessableEvidenceApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusUnprocessableEntity, "EVIDENCE_INVALID", problem.TypeEvidenceInvalid, "Evidence invalid", false),
+			Headers: openapi.UnprocessableEvidenceResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func submitEvidence503(ctx context.Context) openapi.SubmitEnrollmentEvidenceResponseObject {
+	return openapi.SubmitEnrollmentEvidence503ApplicationProblemPlusJSONResponse{
+		ServiceUnavailableApplicationProblemPlusJSONResponse: openapi.ServiceUnavailableApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", problem.TypeDependencyUnavailable, "Dependency unavailable", true),
+			Headers: openapi.ServiceUnavailableResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func mapRefreshChallengeResult(ctx context.Context, result enrollmentapp.ChallengeRefreshResult, err error) openapi.RefreshEnrollmentChallengeResponseObject {
+	if err == nil {
+		return refreshChallenge200(ctx, result)
+	}
+	switch {
+	case errors.Is(err, enrollmentapp.ErrEnrollmentNotFound):
+		return refreshChallenge404(ctx)
+	case errors.Is(err, enrollmentapp.ErrStateConflict):
+		return refreshChallenge409StateConflict(ctx)
+	case errors.Is(err, enrollmentapp.ErrIdempotencyConflict):
+		return refreshChallenge409IdempotencyConflict(ctx)
+	case errors.Is(err, enrollmentapp.ErrIdempotencyReplayUnavailable):
+		return refreshChallenge503(ctx)
+	case errors.Is(err, enrollmentapp.ErrResourceExpired):
+		return refreshChallenge410(ctx)
+	default:
+		var inProgress *enrollmentapp.InProgressError
+		if errors.As(err, &inProgress) {
+			return refreshChallenge503(ctx)
+		}
+		return refreshChallenge503(ctx)
+	}
+}
+
+func refreshChallenge200(ctx context.Context, result enrollmentapp.ChallengeRefreshResult) openapi.RefreshEnrollmentChallengeResponseObject {
+	return openapi.RefreshEnrollmentChallenge200JSONResponse{
+		Body: openapi.ChallengeRefreshResponse{
+			EnrollmentId: openapi.ResourceId(result.EnrollmentID),
+			State:        openapi.ChallengeRefreshResponseStateCHALLENGEISSUED,
+			Challenge: openapi.Challenge{
+				Nonce:            openapi.Base64Url(result.Challenge.Nonce),
+				ChallengeVersion: result.Challenge.ChallengeVersion,
+				ExpiresAt:        result.Challenge.ExpiresAt,
+				PopFormat:        openapi.ChallengePopFormatEnrollmentPopJws,
+			},
+		},
+		Headers: openapi.RefreshEnrollmentChallenge200ResponseHeaders{
+			XCorrelationID: correlationPtr(ctx),
+		},
+	}
+}
+
+func refreshChallenge400(ctx context.Context) openapi.RefreshEnrollmentChallengeResponseObject {
+	return openapi.RefreshEnrollmentChallenge400ApplicationProblemPlusJSONResponse{
+		BadRequestApplicationProblemPlusJSONResponse: openapi.BadRequestApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusBadRequest, "INVALID_REQUEST", problem.TypeInvalidRequest, "Invalid request", false),
+			Headers: openapi.BadRequestResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func refreshChallenge404(ctx context.Context) openapi.RefreshEnrollmentChallengeResponseObject {
+	return openapi.RefreshEnrollmentChallenge404ApplicationProblemPlusJSONResponse{
+		NotFoundApplicationProblemPlusJSONResponse: openapi.NotFoundApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusNotFound, "RESOURCE_NOT_FOUND", problem.TypeResourceNotFound, "Resource not found", false),
+			Headers: openapi.NotFoundResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func refreshChallenge409StateConflict(ctx context.Context) openapi.RefreshEnrollmentChallengeResponseObject {
+	return openapi.RefreshEnrollmentChallenge409ApplicationProblemPlusJSONResponse{
+		ConflictApplicationProblemPlusJSONResponse: openapi.ConflictApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusConflict, "STATE_CONFLICT", problem.TypeStateConflict, "State conflict", false),
+			Headers: openapi.ConflictResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func refreshChallenge409IdempotencyConflict(ctx context.Context) openapi.RefreshEnrollmentChallengeResponseObject {
+	return openapi.RefreshEnrollmentChallenge409ApplicationProblemPlusJSONResponse{
+		ConflictApplicationProblemPlusJSONResponse: openapi.ConflictApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusConflict, "IDEMPOTENCY_CONFLICT", problem.TypeIdempotencyConflict, "Idempotency conflict", false),
+			Headers: openapi.ConflictResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func refreshChallenge410(ctx context.Context) openapi.RefreshEnrollmentChallengeResponseObject {
+	return openapi.RefreshEnrollmentChallenge410ApplicationProblemPlusJSONResponse{
+		GoneApplicationProblemPlusJSONResponse: openapi.GoneApplicationProblemPlusJSONResponse{
+			Body:    problemDetail(ctx, http.StatusGone, "RESOURCE_EXPIRED", problem.TypeResourceExpired, "Resource expired", false),
+			Headers: openapi.GoneResponseHeaders{XCorrelationID: correlationPtr(ctx)},
+		},
+	}
+}
+
+func refreshChallenge503(ctx context.Context) openapi.RefreshEnrollmentChallengeResponseObject {
+	return openapi.RefreshEnrollmentChallenge503ApplicationProblemPlusJSONResponse{
 		ServiceUnavailableApplicationProblemPlusJSONResponse: openapi.ServiceUnavailableApplicationProblemPlusJSONResponse{
 			Body:    problemDetail(ctx, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", problem.TypeDependencyUnavailable, "Dependency unavailable", true),
 			Headers: openapi.ServiceUnavailableResponseHeaders{XCorrelationID: correlationPtr(ctx)},

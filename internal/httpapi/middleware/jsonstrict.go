@@ -22,13 +22,14 @@ type jsonFrame struct {
 	// a member name or '}'; true means the next token must be the member value.
 	expectValue bool
 	keys        map[string]struct{}
-}
-
-func newJSONFrame(d json.Delim) jsonFrame {
-	if d == '{' {
-		return jsonFrame{isObject: true, keys: map[string]struct{}{}}
-	}
-	return jsonFrame{isObject: false}
+	// pendingKey is the member name whose value is currently being read
+	// (objects only). It is used to derive the path of a nested object/array.
+	pendingKey string
+	// path is the sequence of object member names from the document root to
+	// this object/array (arrays inherit their parent path; array elements add
+	// no component). It is used to skip duplicate detection under specific
+	// admitted opaque sub-trees.
+	path []string
 }
 
 // validateJSONDocument verifies that r contains exactly one valid JSON value
@@ -40,10 +41,21 @@ func newJSONFrame(d json.Delim) jsonFrame {
 // SP-13). No regex is involved; the walk uses encoding/json's own tokenizer,
 // which enforces JSON comma/string syntax.
 func validateJSONDocument(r io.Reader) error {
+	return validateJSONDocumentSkipping(r, nil)
+}
+
+// validateJSONDocumentSkipping is validateJSONDocument with a set of admitted
+// opaque sub-tree paths where duplicate members are NOT rejected here. Those
+// sub-trees carry identity-bearing raw JSON whose duplicate detection is owned
+// by the downstream application boundary (which consumes the original bytes
+// before JCS). skipPaths entries are root-relative sequences of object member
+// names; a sub-tree is skipped when its path is exactly a skip path or a
+// descendant of one.
+func validateJSONDocumentSkipping(r io.Reader, skipPaths [][]string) error {
 	dec := json.NewDecoder(r)
 	dec.UseNumber()
 
-	var stack []jsonFrame
+	var stack []*jsonFrame
 	rootDone := false
 
 	for {
@@ -68,7 +80,7 @@ func validateJSONDocument(r io.Reader) error {
 			// Top level: '{' or '[' opens the document; any scalar completes it.
 			if d, ok := tok.(json.Delim); ok {
 				if d == '{' || d == '[' {
-					stack = append(stack, newJSONFrame(d))
+					stack = append(stack, &jsonFrame{isObject: d == '{', keys: map[string]struct{}{}})
 					continue
 				}
 				return fmt.Errorf("%w: unexpected delimiter %q", ErrMalformedJSON, d)
@@ -77,7 +89,7 @@ func validateJSONDocument(r io.Reader) error {
 			continue
 		}
 
-		top := &stack[len(stack)-1]
+		top := stack[len(stack)-1]
 		if top.isObject {
 			if top.expectValue {
 				if d, ok := tok.(json.Delim); ok {
@@ -86,12 +98,14 @@ func validateJSONDocument(r io.Reader) error {
 					}
 					if d == '{' || d == '[' {
 						top.expectValue = false
-						stack = append(stack, newJSONFrame(d))
+						childPath := appendJSONPath(top.path, top.pendingKey)
+						stack = append(stack, &jsonFrame{isObject: d == '{', keys: map[string]struct{}{}, path: childPath})
 						continue
 					}
 					return fmt.Errorf("%w: unexpected delimiter %q", ErrMalformedJSON, d)
 				}
 				top.expectValue = false
+				top.pendingKey = ""
 				continue
 			}
 
@@ -107,10 +121,13 @@ func validateJSONDocument(r io.Reader) error {
 			if !ok {
 				return fmt.Errorf("%w: object member name must be a string", ErrMalformedJSON)
 			}
-			if _, dup := top.keys[key]; dup {
-				return fmt.Errorf("%w: %q", ErrDuplicateJSONMember, key)
+			if !jsonPathSkipped(top.path, skipPaths) {
+				if _, dup := top.keys[key]; dup {
+					return fmt.Errorf("%w: %q", ErrDuplicateJSONMember, key)
+				}
+				top.keys[key] = struct{}{}
 			}
-			top.keys[key] = struct{}{}
+			top.pendingKey = key
 			top.expectValue = true
 			continue
 		}
@@ -125,7 +142,7 @@ func validateJSONDocument(r io.Reader) error {
 					rootDone = true
 				}
 			case '{', '[':
-				stack = append(stack, newJSONFrame(d))
+				stack = append(stack, &jsonFrame{isObject: d == '{', keys: map[string]struct{}{}, path: top.path})
 			default:
 				return fmt.Errorf("%w: unexpected delimiter %q", ErrMalformedJSON, d)
 			}
@@ -133,4 +150,34 @@ func validateJSONDocument(r io.Reader) error {
 		}
 		// Scalar value inside an array is fine.
 	}
+}
+
+// appendJSONPath returns parent extended by key, copying to avoid aliasing the
+// parent slice across concurrently-walked frames.
+func appendJSONPath(parent []string, key string) []string {
+	out := make([]string, len(parent)+1)
+	copy(out, parent)
+	out[len(parent)] = key
+	return out
+}
+
+// jsonPathSkipped reports whether path is exactly a skip path or a descendant
+// of one.
+func jsonPathSkipped(path []string, skipPaths [][]string) bool {
+	for _, sp := range skipPaths {
+		if len(path) < len(sp) {
+			continue
+		}
+		match := true
+		for i := range sp {
+			if path[i] != sp[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
