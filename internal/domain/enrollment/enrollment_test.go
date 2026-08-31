@@ -17,6 +17,7 @@ type mutation struct {
 var mutations = []mutation{
 	{"AcceptEvidence", func(e *Enrollment) error { return e.AcceptEvidence() }},
 	{"Authorize", func(e *Enrollment) error { return e.Authorize() }},
+	{"Reject", func(e *Enrollment) error { return e.Reject() }},
 	{"MarkCARequested", func(e *Enrollment) error { return e.MarkCARequested() }},
 	{"MarkCertificateIssued", func(e *Enrollment) error { return e.MarkCertificateIssued() }},
 	{"MarkDelivered", func(e *Enrollment) error { return e.MarkDelivered() }},
@@ -348,6 +349,7 @@ func TestNoArbitraryStateAssignment(t *testing.T) {
 		"MarkCompleted",
 		"MarkDelivered",
 		"MarkWithheldRevoked",
+		"Reject",
 		"State",
 	}
 	if len(got) != len(want) {
@@ -420,5 +422,106 @@ func TestTransitionErrorsAreTyped(t *testing.T) {
 	te := requireTransitionError(t, err)
 	if te.From != StateChallengeIssued || te.To != StateCompleted {
 		t.Fatalf("TransitionError = %+v", te)
+	}
+}
+
+// L. REJECTED is terminal (Protocol v0.2.7 §22).
+func TestRejectedIsTerminal(t *testing.T) {
+	e := restored(t, StateRejected)
+	if !e.State().IsTerminal() {
+		t.Fatal("REJECTED must be terminal")
+	}
+	// No outgoing transitions.
+	for _, m := range mutations {
+		err := m.run(e)
+		if err == nil {
+			t.Fatalf("transition %s succeeded from REJECTED", m.name)
+		}
+		requireTransitionError(t, err)
+		if got := e.State(); got != StateRejected {
+			t.Fatalf("state changed after rejected transition from REJECTED: %s, want REJECTED", got)
+		}
+	}
+}
+
+// M. Reject is only valid from EVIDENCE_RECEIVED (Protocol v0.2.7 §22).
+func TestRejectValidOrigin(t *testing.T) {
+	e := restored(t, StateEvidenceReceived)
+	if err := e.Reject(); err != nil {
+		t.Fatalf("Reject from EVIDENCE_RECEIVED: %v", err)
+	}
+	if got := e.State(); got != StateRejected {
+		t.Fatalf("state after Reject = %s, want REJECTED", got)
+	}
+}
+
+// N. Reject from non-EVIDENCE_RECEIVED origins must fail.
+func TestRejectForbiddenOrigins(t *testing.T) {
+	forbidden := []State{
+		StateChallengeIssued,
+		StateAuthorized,
+		StateCARequested,
+		StateCertIssued,
+		StateCertDelivered,
+		StateDeviceActivated,
+		StateCompleted,
+		StateExpired,
+		StateCAFailed,
+		StateInstallFailed,
+		StateAborted,
+		StateCertWithheldRevoked,
+		StateRejected, // already terminal
+	}
+	for _, from := range forbidden {
+		e := restored(t, from)
+		err := e.Reject()
+		if err == nil {
+			t.Fatalf("Reject from %s must fail", from)
+		}
+		requireTransitionError(t, err)
+		if got := e.State(); got != from {
+			t.Fatalf("state changed after rejected Reject from %s: %s", from, got)
+		}
+	}
+}
+
+// O. Authorize cannot succeed after rejection.
+func TestAuthorizeAfterRejectFails(t *testing.T) {
+	e := restored(t, StateEvidenceReceived)
+	if err := e.Reject(); err != nil {
+		t.Fatal(err)
+	}
+	err := e.Authorize()
+	if err == nil {
+		t.Fatal("Authorize after Reject must fail")
+	}
+	requireTransitionError(t, err)
+	if got := e.State(); got != StateRejected {
+		t.Fatalf("state = %s, want REJECTED", got)
+	}
+}
+
+// P. No CA progression from REJECTED.
+func TestNoCAProgressionAfterReject(t *testing.T) {
+	e := restored(t, StateEvidenceReceived)
+	if err := e.Reject(); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []struct {
+		name string
+		fn   func(*Enrollment) error
+	}{
+		{"MarkCARequested", (*Enrollment).MarkCARequested},
+		{"MarkCertificateIssued", (*Enrollment).MarkCertificateIssued},
+		{"MarkDelivered", (*Enrollment).MarkDelivered},
+	} {
+		err := m.fn(e)
+		if err == nil {
+			t.Fatalf("%s after Reject must fail", m.name)
+		}
+		requireTransitionError(t, err)
+		if got := e.State(); got != StateRejected {
+			t.Fatalf("state changed after %s from REJECTED: %s", m.name, got)
+		}
 	}
 }

@@ -141,6 +141,7 @@ type EnrollmentRecord struct {
 	Challenge            Challenge
 	EvidenceRequirements EvidenceRequirements
 	AcceptedEvidence     *AcceptedEvidence
+	EvaluationMaterial   *EvaluationMaterial
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }

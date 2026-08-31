@@ -65,6 +65,7 @@ type EvidenceAcceptanceWrite struct {
 	EnrollmentID             string
 	ExpectedChallengeVersion int
 	Evidence                 AcceptedEvidence
+	Material                 *EvaluationMaterial
 	AcceptedAt               time.Time
 }
 

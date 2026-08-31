@@ -58,6 +58,9 @@ type MemoryStore struct {
 	policies         map[policyKey]policyRecord
 	audits           []application.AuditEvent
 	policyVersion    uint64
+
+	// M5.9 Phase-2 evaluation state.
+	eval *evaluationStoreState
 }
 
 func NewMemoryStore(authority *preonboardingruntime.MemoryStore) (*MemoryStore, error) {
@@ -74,6 +77,7 @@ func NewMemoryStore(authority *preonboardingruntime.MemoryStore) (*MemoryStore, 
 		idemCommitted:    make(map[idempotencyruntime.EffectiveScope]*idempotencyruntime.Record),
 		policies:         make(map[policyKey]policyRecord),
 		audits:           make([]application.AuditEvent, 0),
+		eval:             newEvaluationStoreState(),
 	}, nil
 }
 
@@ -183,6 +187,24 @@ func (s *MemoryStore) GetEnrollment(id string) (application.EnrollmentRecord, bo
 		return application.EnrollmentRecord{}, false
 	}
 	return cloneEnrollmentRecord(rec), true
+}
+
+// StoreEnrollment directly persists an enrollment record. This is intended
+// for test seeding and database hydration only; it bypasses the normal
+// state-machine creation path.
+func (s *MemoryStore) StoreEnrollment(rec application.EnrollmentRecord) error {
+	if rec.Aggregate == nil || rec.Aggregate.ID() == "" {
+		return errors.New("enrollment runtime: invalid enrollment record")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Refuse to overwrite an existing enrollment via this generic path.
+	// This helper is for initial test/database seeding only.
+	if _, exists := s.enrollments[string(rec.Aggregate.ID())]; exists {
+		return errors.New("enrollment runtime: enrollment already exists")
+	}
+	s.enrollments[string(rec.Aggregate.ID())] = cloneEnrollmentRecord(rec)
+	return nil
 }
 
 func (s *MemoryStore) AuditEvents() []application.AuditEvent {
@@ -554,9 +576,24 @@ func (r *memoryContinuationRepository) StageEvidenceAcceptance(_ context.Context
 	evidence := write.Evidence.Clone()
 	updated.AcceptedEvidence = &evidence
 	updated.UpdatedAt = write.AcceptedAt
+
+	// M5.9: Stage evaluation material alongside evidence acceptance.
+	if write.Material != nil && write.Material.Validate() == nil {
+		material := write.Material.Clone()
+		updated.EvaluationMaterial = &material
+	}
+
 	r.uow.stagedEnrollments[write.EnrollmentID] = updated
 	cp := write
 	cp.Evidence = write.Evidence.Clone()
+	// Take ownership of the evaluation material at the staging boundary so the
+	// staged write is independent of caller memory. A shallow copy would retain
+	// the caller's *EvaluationMaterial pointer and let post-stage mutation of
+	// TPMPayload/AgentAssertions backing bytes leak into Commit.
+	if write.Material != nil {
+		material := write.Material.Clone()
+		cp.Material = &material
+	}
 	r.uow.stagedEvidence = &cp
 	r.uow.stagedAudits = append(r.uow.stagedAudits, application.AuditEvent{
 		Type: application.AuditEventEvidenceAccepted, EnrollmentID: write.EnrollmentID,
@@ -983,6 +1020,11 @@ func cloneEnrollmentRecord(rec application.EnrollmentRecord) application.Enrollm
 		} else {
 			out.Aggregate = nil
 		}
+	}
+	// Deep-clone EvaluationMaterial to prevent aliasing.
+	if rec.EvaluationMaterial != nil {
+		m := rec.EvaluationMaterial.Clone()
+		out.EvaluationMaterial = &m
 	}
 	return out
 }

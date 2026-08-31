@@ -84,7 +84,7 @@ func canTransition(from, to State) bool {
 	case StateChallengeIssued:
 		return to == StateEvidenceReceived
 	case StateEvidenceReceived:
-		return to == StateAuthorized
+		return to == StateAuthorized || to == StateRejected
 	case StateAuthorized:
 		return to == StateCARequested
 	case StateCARequested:

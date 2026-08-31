@@ -663,6 +663,14 @@ func (s *Service) SubmitEvidence(ctx context.Context, cmd EvidenceSubmissionComm
 		Fingerprint:              fp,
 		Representation:           repBytes,
 		PopNonce:                 *popPayload.Nonce,
+		Material: &EvaluationMaterial{
+			CSRSha256:       csrSha256Hex,
+			PublicKeySha256: spkiSha256Hex,
+			TPMFormat:       cmd.TpmFormat,
+			TPMVersion:      cmd.TpmVersion,
+			TPMPayload:      cmd.TpmPayload,
+			AgentAssertions: cmd.AgentAssertions,
+		},
 	})
 }
 

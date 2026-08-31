@@ -4,11 +4,11 @@
 
 For implementation work, use the following sources in this order:
 
-1. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.5.yaml`
+1. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.6.yaml`
    - executable HTTP/API contract
-2. `docs/Enrollment_Platform_Enrollment_Protocol_Specification_v0.2.6.docx`
+2. `docs/Enrollment_Platform_Enrollment_Protocol_Specification_v0.2.7.docx`
    - normative protocol semantics
-3. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.5_README.md`
+3. `docs/Enrollment_Platform_OpenAPI_Contract_Draft_v0.1.6_README.md`
    - implementation and contract notes
 
 Do not modify these controlled documents unless explicitly authorized.
@@ -119,7 +119,7 @@ Opaque authentication tokens use non-reversible server-side verifiers.
 
 For server-generated secrets returned by an originating response,
 the protocol permits only the temporary encrypted Idempotency Replay Capsule
-defined in Protocol v0.2.6.
+defined in Protocol v0.2.7.
 
 The replay capsule:
 
@@ -383,8 +383,8 @@ Report:
 
 If a requested implementation conflicts with:
 
-- OpenAPI v0.1.5;
-- Protocol v0.2.6;
+- OpenAPI v0.1.6;
+- Protocol v0.2.7;
 - an architecture invariant in this file;
 
 do not silently resolve the conflict.

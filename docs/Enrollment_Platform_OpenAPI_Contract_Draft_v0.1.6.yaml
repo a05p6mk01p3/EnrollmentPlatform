@@ -1,0 +1,3173 @@
+openapi: 3.1.2
+jsonSchemaDialect: https://spec.openapis.org/oas/3.1/dialect/2024-11-10
+info:
+  title: Enrollment Platform - OpenAPI / Contract Draft v0.1.6
+  version: 0.1.6
+  summary: OpenAPI / Contract Draft v0.1.6 derived from Enrollment Protocol Specification v0.2.7
+  description: 'Executable contract derived from Enrollment Protocol Specification v0.2.7. Provenance synchronization for
+    CR-M5.9-001 (protocol-level Phase-2 definitive rejection: EVIDENCE_RECEIVED -> REJECTED terminal pre-CA and ISSUANCE_DENIED
+    as an internal audit event; committed evidence admission stays historical and replayable). CR-M5.8-001 keyless
+    resource-idempotent evidence identity and CR-M5.8-002 authentication-before-keyed-replay semantics are preserved. No wire
+    model change: paths, operations, schemas, status codes, error codes, security schemes and EnrollmentState values are
+    unchanged.'
+  x-document-status: DRAFT TECHNICAL CONTRACT - REVIEWED REVISION
+  x-source-protocol: Enrollment Protocol Specification v0.2.7
+  x-change-request: CR-M5.9-001
+  x-open-008: CLOSED_AT_LOGICAL_PROTOCOL_LEVEL
+servers:
+- url: https://enrollment.example.invalid
+  description: Placeholder public Reverse Proxy endpoint. Replace during deployment specification.
+  x-placeholder: true
+tags:
+- name: Authorization
+  description: Authenticated-principal authorization discovery.
+- name: Pre-Onboarding
+  description: Claimed-device proposal and pre-approval lifecycle.
+- name: Enrollment
+  description: Enrollment, evidence, challenge, certificate delivery and activation.
+- name: PKI Trust
+  description: Transport-delivered trust bundle; separate from issuance trust.
+- name: Administration
+  description: Administrative approval, rebinding, revocation and contingency operations.
+x-open-items:
+  OPEN-003: Agent login acquisition flow remains outside this contract.
+  OPEN-004A: TPM evidence payload wire format and final evidence-specific limits remain open.
+  OPEN-004B-D: Attestation verifier implementation/trust anchors/hardware compatibility remain external.
+  OPEN-005: Minimum assurance policy values remain server-side policy inputs.
+  OPEN-006: Final certificate validity/renewal/overlap values remain policy inputs.
+  OPEN-007: CRL/relying-party operational behavior remains external.
+  OPEN-009: Physical DB schema/locking/storage of replay capsules remains external.
+x-protocol-limits:
+  general_json_default_bytes: 262144
+  absolute_request_body_bytes: 4194304
+  csr_der_decoded_bytes: 65536
+  array_default_max_items: 128
+  common_string_default_max_chars: 4096
+  page_size_default: 50
+  page_size_max: 200
+  tpm_evidence_specific_limit: OPEN-004A
+x-contract-gaps:
+- id: CG-001
+  description: Protocol §16.1 conceptually names GET /v1/admin/devices, /v1/admin/enrollments and /v1/admin/certificates,
+    but the authoritative 21-operation matrix still omits them. This Draft does not invent them.
+- id: CG-002
+  description: Concrete admin scopes for rebinding and Temporary Principal management remain policy/authorization items not
+    yet assigned stable scope names. Operations are marked with machine-readable x-domain-authorization metadata instead of
+    inventing scopes.
+- id: CG-003
+  description: Exact quantitative TTLs/replay windows and TPM evidence payload size remain configuration/OPEN items and are
+    not frozen by this contract.
+paths:
+  /v1/me/authorizations:
+    get:
+      summary: List effective partner/scope authorizations for the authenticated principal
+      operationId: getMyAuthorizations
+      tags:
+      - Authorization
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - HumanOIDC: []
+      parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Effective current authorizations.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyAuthorizationsResponse'
+              example:
+                principal_id: principal-123
+                partners:
+                - partner_id: P1
+                  display_name: Revenda A
+                  scopes:
+                  - device:preonboard
+                - partner_id: P2
+                  display_name: Revenda B
+                  scopes:
+                  - device:preonboard
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-error-codes:
+        '401': &id001
+        - AUTHENTICATION_REQUIRED
+        '403': &id002
+        - SCOPE_DENIED
+        - PARTNER_NOT_AUTHORIZED
+        '429': &id003
+        - RATE_LIMITED
+        '503': &id004
+        - DEPENDENCY_UNAVAILABLE
+  /v1/pre-onboarding-requests:
+    post:
+      summary: Create a pre-onboarding request
+      operationId: createPreOnboardingRequest
+      tags:
+      - Pre-Onboarding
+      description: Creates claimed/non-attested device proposal. partner_id is revalidated server-side. Temporary principal
+        may submit but cannot approve. A successful same-scope/same-fingerprint replay returns the original committed 201
+        representation, original ETag and original Location; X-Correlation-ID belongs to the current HTTP attempt.
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - HumanOIDC: []
+      - TemporaryPrincipalToken: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreOnboardingCreateRequest'
+            example:
+              partner_id: P1
+              claimed_device:
+                hostname: PC-001
+                serial_number: SN123
+                smbios_uuid: '...'
+                manufacturer: Example
+                model: Workstation
+                tpm_present: true
+                tpm_vendor: '...'
+                ek_public_hash: '...'
+              agent:
+                version: 1.0.0
+                platform: windows
+      responses:
+        '201':
+          description: Pre-onboarding request created. Request access token is returned once. A successful idempotent replay
+            returns this original committed 201 representation, including the exact original request_access_token.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: 'Location of the created pre-onboarding request: /v1/pre-onboarding-requests/{pre_onboarding_request_id}.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreOnboardingCreateResponse'
+              example:
+                pre_onboarding_request_id: por-123
+                status: PENDING_APPROVAL
+                partner_id: P1
+                expires_at: '2026-08-21T23:00:00Z'
+                request_access_token: reqtok_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyReplayConflictOrUnavailable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-error-codes:
+        '400': &id005
+        - INVALID_REQUEST
+        '401': *id001
+        '403': *id002
+        '409':
+        - IDEMPOTENCY_CONFLICT
+        - IDEMPOTENCY_REPLAY_UNAVAILABLE
+        '413': &id007
+        - PAYLOAD_TOO_LARGE
+        '415': &id008
+        - UNSUPPORTED_MEDIA_TYPE
+        '429': *id003
+        '503': *id004
+      x-idempotent-secret-replay:
+        secretField: request_access_token
+        mechanism: encrypted-idempotency-replay-capsule
+        sameSecretRequired: true
+        activeVerifierStorage: non-reversible
+        capsulePurpose: response-loss-recovery-only
+        originator:
+          operationId: createPreOnboardingRequest
+          method: POST
+          routeTemplate: /v1/pre-onboarding-requests
+          resourceKind: PRE_ONBOARDING_REQUEST
+          resourceId: pre_onboarding_request_id
+          issuedCredentialType: REQUEST_ACCESS_TOKEN
+          issuedCredentialVersion: 1
+        effectiveScope: CredentialScope(credential kind, opaque non-secret server-authenticated credential binding) + canonical uppercase HTTP method + canonical OpenAPI route template + exact Idempotency-Key
+        aadV1: [aad_domain, aad_version, originator_operation, originator_resource_kind, originator_resource_id, effective_scope_credential_kind, effective_scope_credential_binding, effective_scope_method, effective_scope_route_template, effective_scope_idempotency_key, request_fingerprint_version, request_fingerprint_digest, issued_credential_type, issued_credential_version]
+        aadEncoding: deterministic, versioned, domain-separated, ordered, length-framed, unambiguous; integer/version fields are unsigned big-endian; no secret plaintext
+        recovery: permanent loss of an authoritatively known committed result is 409 IDEMPOTENCY_REPLAY_UNAVAILABLE retryable=false; transient protector failure is 503 DEPENDENCY_UNAVAILABLE retryable=true; neither permits replacement minting
+        replayAuthority: no mutation; no quota consumption; original result snapshot supplies body, ETag and Location; current-attempt correlation ID is excluded from scope, fingerprint and AAD
+  /v1/pre-onboarding-requests/{id}:
+    get:
+      summary: Get pre-onboarding request status
+      operationId: getPreOnboardingRequest
+      tags:
+      - Pre-Onboarding
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - HumanOIDC: []
+      - RequestAccessToken: []
+      parameters:
+      - $ref: '#/components/parameters/PreOnboardingRequestId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Request status. Sensitive administrative fields may be reduced for RequestAccessToken mode.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreOnboardingRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-error-codes:
+        '401': *id001
+        '403': *id002
+        '404': &id009
+        - RESOURCE_NOT_FOUND
+        '410': &id006
+        - RESOURCE_EXPIRED
+        '429': *id003
+        '503': *id004
+  /v1/enrollments:
+    post:
+      summary: Create an enrollment transaction
+      operationId: createEnrollment
+      tags:
+      - Enrollment
+      description: 'INITIAL: RequestAccessToken is consumed atomically with enrollment/challenge/access-token creation. RENEWAL/REKEY:
+        DeviceMTLS is required. The server enforces the security/body pairing.'
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - RequestAccessToken: []
+      - DeviceMTLS: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollmentCreateRequest'
+            example:
+              operation: INITIAL
+              certificate_usage: PARTNER_AUTH
+      responses:
+        '201':
+          description: Enrollment created in CHALLENGE_ISSUED. enrollment_access_token is secret. For idempotent replay, the
+            same token can be reproduced only while the replay capsule remains valid.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: 'Location of the created enrollment: /v1/enrollments/{enrollment_id}.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentCreateResponse'
+              example:
+                enrollment_id: enr-123
+                operation: INITIAL
+                device_id: dev-123
+                state: CHALLENGE_ISSUED
+                challenge:
+                  nonce: AbCdEf123_
+                  challenge_version: 1
+                  expires_at: '2026-08-20T23:30:00Z'
+                  pop_format: enrollment-pop+jws
+                evidence_requirements:
+                  tpm_evidence_protocol_versions:
+                  - '1'
+                  minimum_assurance: A2
+                  allowed_key_profiles:
+                  - ECDSA_P256
+                enrollment_access_token: enrtok_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyReplayConflictOrUnavailable'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-security-conditions:
+        discriminator: operation
+        cases:
+          INITIAL:
+            requiredSecurityScheme: RequestAccessToken
+          RENEWAL:
+            requiredSecurityScheme: DeviceMTLS
+          REKEY:
+            requiredSecurityScheme: DeviceMTLS
+        enforcement: MANDATORY_SERVER_POLICY_AND_CONTRACT_TEST
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '409':
+        - IDEMPOTENCY_CONFLICT
+        - IDEMPOTENCY_REPLAY_UNAVAILABLE
+        '410': *id006
+        '413': *id007
+        '415': *id008
+        '429': *id003
+        '503': *id004
+      x-idempotent-secret-replay:
+        secretField: enrollment_access_token
+        mechanism: encrypted-idempotency-replay-capsule
+        sameSecretRequired: true
+        activeVerifierStorage: non-reversible
+        capsulePurpose: response-loss-recovery-only
+        originator:
+          operationId: createEnrollment
+          method: POST
+          routeTemplate: /v1/enrollments
+          resourceKind: ENROLLMENT
+          resourceId: enrollment_id
+          issuedCredentialType: ENROLLMENT_ACCESS_TOKEN
+          issuedCredentialVersion: 1
+        effectiveScope: CredentialScope(credential kind, opaque non-secret server-authenticated credential binding) + canonical uppercase HTTP method + canonical OpenAPI route template + exact Idempotency-Key
+        aadV1: [aad_domain, aad_version, originator_operation, originator_resource_kind, originator_resource_id, effective_scope_credential_kind, effective_scope_credential_binding, effective_scope_method, effective_scope_route_template, effective_scope_idempotency_key, request_fingerprint_version, request_fingerprint_digest, issued_credential_type, issued_credential_version]
+        aadEncoding: deterministic, versioned, domain-separated, ordered, length-framed, unambiguous; integer/version fields are unsigned big-endian; no secret plaintext
+        recovery: permanent loss of an authoritatively known committed result is 409 IDEMPOTENCY_REPLAY_UNAVAILABLE retryable=false; transient protector failure is 503 DEPENDENCY_UNAVAILABLE retryable=true; neither permits replacement minting
+  /v1/enrollments/{id}:
+    get:
+      summary: Get enrollment state
+      operationId: getEnrollment
+      tags:
+      - Enrollment
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - EnrollmentAccessToken: []
+      parameters:
+      - $ref: '#/components/parameters/EnrollmentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Current persisted enrollment state.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Enrollment'
+              example:
+                enrollment_id: enr-123
+                device_id: dev-123
+                operation: INITIAL
+                certificate_usage: PARTNER_AUTH
+                state: CA_REQUESTED
+                challenge: null
+                assurance_level: A2
+                certificate_id: null
+                created_at: '2026-08-20T23:00:00Z'
+                updated_at: '2026-08-20T23:01:00Z'
+                retry_after_seconds: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-error-codes:
+        '401': *id001
+        '404': *id009
+        '410': *id006
+        '429': *id003
+        '503': *id004
+  /v1/enrollments/{id}/evidence:
+    put:
+      summary: Submit CSR, JWS PoP and TPM evidence
+      operationId: submitEnrollmentEvidence
+      tags:
+      - Enrollment
+      description: 'Keyless resource-idempotent evidence acceptance. EvidenceIdentityV1 is SHA-256 over the controlled,
+        domain-separated, ordered, uint32-length-framed identity encoding: authoritative route-bound enrollment_id;
+        challenge_version as unsigned big-endian; SHA-256 of decoded validated CSR DER; exact validated JWS Compact bytes;
+        validated TPM format/version; RFC 8785/JCS payload JSON; and absent-or-RFC-8785/JCS agent_assertions. Duplicate
+        identity-bearing JSON names are rejected before JCS. A matching accepted identity returns the original committed 202
+        response without mutation even after challenge expiry. A first unresolved expired submit is 410 RESOURCE_EXPIRED;
+        different evidence after acceptance is 409 STATE_CONFLICT. Evidence identity is not authentication material:
+        EnrollmentAccessToken authentication and exact resource binding precede retry recognition. challenge_version
+        acceptance competes atomically with challenge refresh; exactly one wins.'
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      x-evidence-identity:
+        version: 1
+        algorithm: SHA-256
+        encoding: ordered-domain-separated-uint32-big-endian-length-framed-components
+        unsignedIntegerEncoding: minimal-big-endian-no-leading-zeroes; zero-is-00
+        components:
+        - domain UTF-8 literal enrollment-platform/evidence-identity
+        - identity_version unsigned-big-endian integer 1
+        - authoritative route-bound enrollment_id UTF-8
+        - challenge_version unsigned-big-endian integer
+        - csr_der_sha256 raw 32-byte SHA-256 of decoded validated PKCS#10 DER
+        - jws_compact exact UTF-8 validated JWS Compact Serialization
+        - tpm_evidence.format validated UTF-8
+        - tpm_evidence.version validated UTF-8
+        - tpm_evidence.payload UTF-8 RFC-8785/JCS opaque JSON object
+        - agent_assertions zero-length when absent, otherwise UTF-8 RFC-8785/JCS complete object
+        jsonCanonicalization: RFC-8785-JCS-for-identity-only
+        excludes: [EnrollmentAccessToken, Authorization, X-Correlation-ID, server-clock, retry-counters, transient-server-values, client-provided-fingerprint]
+        retry: same persisted EvidenceIdentityV1 returns original committed 202; missing/corrupt identity is 503 DEPENDENCY_UNAVAILABLE
+      security:
+      - EnrollmentAccessToken: []
+      parameters:
+      - $ref: '#/components/parameters/EnrollmentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvidenceSubmission'
+            example:
+              challenge_version: 1
+              csr_der_base64: TUlJQkNTUl9ERVI=
+              pop:
+                format: enrollment-pop+jws
+                jws: eyJhbGciOiJFUzI1NiIsInR5cCI6ImVucm9sbG1lbnQtcG9wK2p3cyJ9.eyJ2ZXJzaW9uIjoxfQ.signature
+              tpm_evidence:
+                format: enrollment-tpm-evidence
+                version: '1'
+                payload: {}
+              agent_assertions:
+                tpm_ready: true
+                provider: Microsoft Platform Crypto Provider
+                hardware_backed: true
+                private_key_exportable: false
+      responses:
+        '202':
+          description: Evidence accepted for processing. A matching accepted EvidenceIdentityV1 retry returns this original
+            committed 202 representation; X-Correlation-ID is from the current attempt. Poll status_url.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceAcceptedResponse'
+              example:
+                enrollment_id: enr-123
+                state: EVIDENCE_RECEIVED
+                status_url: /v1/enrollments/enr-123
+                retry_after_seconds: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEvidence'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '404': *id009
+        '409':
+        - STATE_CONFLICT
+        '410': *id006
+        '413': *id007
+        '415': *id008
+        '422':
+        - EVIDENCE_INVALID
+        '429': *id003
+        '503': *id004
+  /v1/enrollments/{id}/challenge:refresh:
+    post:
+      summary: Refresh the active enrollment challenge
+      operationId: refreshEnrollmentChallenge
+      tags:
+      - Enrollment
+      description: 'Allowed only before authorization commit point and when no accepted evidence is bound to the old challenge.
+        Refresh and evidence acceptance compare the same challenge_version atomically; loser receives 409 STATE_CONFLICT.
+        EnrollmentAccessToken authentication and exact enrollment resource binding are required before ordinary idempotency
+        replay. With valid authentication, the same committed EffectiveScope, Idempotency-Key, and request fingerprint may
+        replay the original 200 response after old-challenge expiry or other business freshness advancement. Expired, invalid,
+        revoked, unauthorized, or resource-mismatched credentials remain 401 AUTHENTICATION_REQUIRED (or the existing
+        ordinary authentication/authorization outcome); Idempotency-Key, fingerprint, and prior-result knowledge are not
+        authentication material and create no recovery credential.'
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - EnrollmentAccessToken: []
+      parameters:
+      - $ref: '#/components/parameters/EnrollmentId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChallengeRefreshRequest'
+            example:
+              expected_challenge_version: 1
+      responses:
+        '200':
+          description: Active enrollment challenge replaced successfully; no independent REST resource is created.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChallengeRefreshResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '404': *id009
+        '409':
+        - STATE_CONFLICT
+        - IDEMPOTENCY_CONFLICT
+        '410': *id006
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '413': *id007
+  /v1/enrollments/{id}/certificate:
+    get:
+      summary: Retrieve deliverable certificate and issuer intermediates
+      operationId: getEnrollmentCertificate
+      tags:
+      - Enrollment
+      description: Returns leaf only after post-CA eligibility revalidation. Root trust is not implicitly bootstrapped by
+        this response.
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - EnrollmentAccessToken: []
+      parameters:
+      - $ref: '#/components/parameters/EnrollmentId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Deliverable certificate.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateDeliveryResponse'
+              example:
+                certificate_id: cert-123
+                serial_number: 01AB
+                fingerprint_sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+                leaf_der_base64: TUlJQ0xFQUZfREVS
+                installation_chain:
+                - role: INTERMEDIATE
+                  der_base64: TUlJQ0NFUlRfREVS
+                  fingerprint_sha256: '1111111111111111111111111111111111111111111111111111111111111111'
+                activation:
+                  method: DEVICE_MTLS
+                  complete_url: /v1/enrollments/enr-123/complete
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/CertificateNotDeliverable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-error-codes:
+        '401': *id001
+        '404': *id009
+        '409':
+        - CERTIFICATE_NOT_DELIVERABLE
+        '429': *id003
+        '503': *id004
+  /v1/enrollments/{id}/complete:
+    post:
+      summary: Complete enrollment activation or report installation failure
+      operationId: completeEnrollment
+      tags:
+      - Enrollment
+      description: INSTALLED requires DeviceMTLS with exactly the certificate issued by this enrollment. FAILED uses EnrollmentAccessToken.
+        Server resolves certificate identity from authenticated mTLS metadata; client-supplied IDs never override it.
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - DeviceMTLS: []
+      - EnrollmentAccessToken: []
+      parameters:
+      - $ref: '#/components/parameters/EnrollmentId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollmentCompleteRequest'
+            examples:
+              installed:
+                summary: Successful activation over DeviceMTLS
+                value:
+                  installation_status: INSTALLED
+                  local_assertions:
+                    store: LocalMachine/My
+                    provider: Microsoft Platform Crypto Provider
+              failed:
+                summary: Installation failed before mTLS activation
+                value:
+                  installation_status: FAILED
+                  error_code: AGENT_INSTALL_FAILED
+      responses:
+        '200':
+          description: Completion result. INSTALLED leads to COMPLETED/ACTIVE; installation failure records INSTALL_FAILED
+            without deleting certificate history.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentCompletionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-security-conditions:
+        discriminator: installation_status
+        cases:
+          INSTALLED:
+            requiredSecurityScheme: DeviceMTLS
+          FAILED:
+            requiredSecurityScheme: EnrollmentAccessToken
+        enforcement: MANDATORY_SERVER_POLICY_AND_CONTRACT_TEST
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '409':
+        - STATE_CONFLICT
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '413': *id007
+  /v1/pki/trust-bundles/current:
+    get:
+      summary: Get current device PKI trust bundle
+      operationId: getCurrentTrustBundle
+      tags:
+      - PKI Trust
+      description: Transport-delivered trust bundle. Receiving a root here does not collapse Transport Trust and Issuance
+        Trust; Agent bootstrap/pinning policy is defined separately.
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security: []
+      parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Current trust bundle.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustBundleResponse'
+              example:
+                bundle_id: device-pki-2026-01
+                roots:
+                - der_base64: TUlJQ0NFUlRfREVS
+                  fingerprint_sha256: '2222222222222222222222222222222222222222222222222222222222222222'
+                intermediates:
+                - der_base64: TUlJQ0NFUlRfREVS
+                  fingerprint_sha256: '1111111111111111111111111111111111111111111111111111111111111111'
+                valid_from: '2026-08-01T00:00:00Z'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-error-codes:
+        '429': *id003
+        '503': *id004
+  /v1/admin/pre-onboarding-requests:
+    get:
+      summary: List pre-onboarding requests
+      operationId: adminListPreOnboardingRequests
+      tags:
+      - Administration
+      description: 'List pre-onboarding requests. Returns only requests for partners for which the authenticated administrator
+        currently has server-side authority; client-supplied partner_id is an optional filter over that authorized set.'
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      x-required-scopes:
+      - device:approve
+      parameters:
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/PageToken'
+      - $ref: '#/components/parameters/CorrelationId'
+      - name: partner_id
+        in: query
+        required: false
+        description: Allowlisted partner filter.
+        schema:
+          $ref: '#/components/schemas/ResourceId'
+      - name: status
+        in: query
+        required: false
+        description: Allowlisted status filter.
+        schema:
+          $ref: '#/components/schemas/PreOnboardingStatus'
+      - name: created_from
+        in: query
+        required: false
+        description: Allowlisted date filter lower bound.
+        schema:
+          $ref: '#/components/schemas/Timestamp'
+      - name: created_to
+        in: query
+        required: false
+        description: Allowlisted date filter upper bound.
+        schema:
+          $ref: '#/components/schemas/Timestamp'
+      responses:
+        '200':
+          description: Bounded paginated result.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPreOnboardingRequests'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-domain-authorization:
+        required: true
+        scopeStatus: CONFIRMED_OR_CONSOLIDATED
+        requiredScopes:
+        - device:approve
+      x-error-codes:
+        '401': *id001
+        '403': *id002
+        '429': *id003
+        '503': *id004
+  /v1/admin/pre-onboarding-requests/{id}:
+    get:
+      summary: Get pre-onboarding request by identifier for administrative caller
+      operationId: adminGetPreOnboardingRequest
+      tags:
+      - Administration
+      description: 'Administrative read of a pre-onboarding request representation and current strong ETag validator. Caller
+        must possess AdminOIDC authentication, device:approve scope, and current server-side authority for the authoritative
+        partner of the resource. If the caller lacks authority for the partner, the endpoint conceals existence with 404 RESOURCE_NOT_FOUND
+        (M5.5-DEC-002).'
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      x-required-scopes:
+      - device:approve
+      parameters:
+      - $ref: '#/components/parameters/PreOnboardingRequestId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Pre-onboarding request representation with strong ETag header.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreOnboardingRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-domain-authorization:
+        required: true
+        scopeStatus: CONFIRMED_OR_CONSOLIDATED
+        requiredScopes:
+        - device:approve
+      x-error-codes:
+        '401': *id001
+        '403':
+        - SCOPE_DENIED
+        '404': *id009
+        '429': *id003
+        '503': *id004
+  /v1/admin/pre-onboarding-requests/{id}/approve:
+    post:
+      summary: Approve pre-onboarding request
+      operationId: adminApprovePreOnboardingRequest
+      tags:
+      - Administration
+      description: 'Approve pre-onboarding request. Caller must possess AdminOIDC authentication, device:approve scope, and
+        current server-side authority for the authoritative partner of the resource. Approval additionally requires current
+        partner eligibility. Logical device_id is created if needed. Approval does not issue a certificate.'
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      x-required-scopes:
+      - device:approve
+      parameters:
+      - $ref: '#/components/parameters/PreOnboardingRequestId'
+      - $ref: '#/components/parameters/IfMatch'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminDecisionRequest'
+            example:
+              reason: approved
+              expected_status: PENDING_APPROVAL
+      responses:
+        '200':
+          description: Approved; logical device_id created if needed. Approval does not issue a certificate.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreOnboardingApprovalResponse'
+              example:
+                pre_onboarding_request_id: por-123
+                status: ENROLLMENT_READY
+                device_id: dev-123
+                resource_version: 4
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-concurrency:
+        mechanism: strong-etag-if-match
+        staleStatus: 412
+        domainStateConflictStatus: 409
+      x-domain-authorization:
+        required: true
+        scopeStatus: CONFIRMED_OR_CONSOLIDATED
+        requiredScopes:
+        - device:approve
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '409':
+        - STATE_CONFLICT
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '412': &id010
+        - PRECONDITION_FAILED
+        '413': *id007
+  /v1/admin/pre-onboarding-requests/{id}/reject:
+    post:
+      summary: Reject pre-onboarding request
+      operationId: adminRejectPreOnboardingRequest
+      tags:
+      - Administration
+      description: 'Reject pre-onboarding request. Caller must possess AdminOIDC authentication, device:approve scope, and
+        current server-side authority for the authoritative partner of the resource. Reject does not gain a current-partner-eligibility
+        requirement. REJECTED is terminal for this pre-onboarding request.'
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      x-required-scopes:
+      - device:approve
+      parameters:
+      - $ref: '#/components/parameters/PreOnboardingRequestId'
+      - $ref: '#/components/parameters/IfMatch'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminDecisionRequest'
+            example:
+              reason: not approved
+              expected_status: PENDING_APPROVAL
+      responses:
+        '200':
+          description: Rejected; REJECTED is terminal for this pre-onboarding request.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreOnboardingRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-concurrency:
+        mechanism: strong-etag-if-match
+        staleStatus: 412
+        domainStateConflictStatus: 409
+      x-domain-authorization:
+        required: true
+        scopeStatus: CONFIRMED_OR_CONSOLIDATED
+        requiredScopes:
+        - device:approve
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '409':
+        - STATE_CONFLICT
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '412': *id010
+        '413': *id007
+  /v1/admin/devices/{id}/rebind-requests:
+    post:
+      summary: Create a device rebinding request
+      operationId: adminCreateDeviceRebindRequest
+      tags:
+      - Administration
+      description: Administrative request does not complete rebinding by itself; fresh evidence/attestation is still required
+        by policy.
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      parameters:
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RebindCreateRequest'
+            example:
+              reason: TPM_REPLACED
+              notes: hardware replacement
+      responses:
+        '201':
+          description: Device rebinding request created.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: 'Location of the created rebind request: /v1/admin/device-rebind-requests/{rebind_request_id}.'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RebindCreateResponse'
+              example:
+                rebind_request_id: rbr-123
+                device_id: dev-123
+                status: PENDING_APPROVAL
+                resource_version: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-domain-authorization:
+        required: true
+        status: OPEN_SCOPE_NAME
+        highImpact: true
+        stepUpPolicy: policy-defined
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '409':
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '413': *id007
+  /v1/admin/device-rebind-requests/{id}/approve:
+    post:
+      summary: Approve a device rebinding request
+      operationId: adminApproveDeviceRebindRequest
+      tags:
+      - Administration
+      description: Administrative approval alone does not complete rebinding; device remains pending until evidence/attestation
+        satisfies policy.
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      parameters:
+      - $ref: '#/components/parameters/RebindRequestId'
+      - $ref: '#/components/parameters/IfMatch'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RebindApproveRequest'
+            example:
+              reason: hardware replacement validated
+      responses:
+        '200':
+          description: Administrative approval applied; fresh attestation/evidence is still required before rebinding completes.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RebindApproveResponse'
+              example:
+                rebind_request_id: rbr-123
+                status: APPROVED_PENDING_ATTESTATION
+                resource_version: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-concurrency:
+        mechanism: strong-etag-if-match
+        staleStatus: 412
+        domainStateConflictStatus: 409
+      x-domain-authorization:
+        required: true
+        status: OPEN_SCOPE_NAME
+        highImpact: true
+        stepUpPolicy: policy-defined
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '409':
+        - STATE_CONFLICT
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '412': *id010
+        '413': *id007
+  /v1/admin/certificates/{id}/revocations:
+    post:
+      summary: Request certificate revocation with authoritative cascade scope
+      operationId: adminCreateRevocationRequest
+      tags:
+      - Administration
+      description: Server computes the authoritative affected set from scope and domain links. Caller never supplies the final
+        certificate list. 202 means accepted, not CRL-published.
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      x-required-scopes:
+      - certificate:revoke
+      parameters:
+      - $ref: '#/components/parameters/CertificateId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevocationCreateRequest'
+            example:
+              reason: KEY_COMPROMISE
+              scope: KEY
+              comment: incident reference ...
+      responses:
+        '202':
+          description: Revocation request accepted. Large cascades are represented by count + status resource, not inline
+            IDs.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: 'Location of the revocation status resource: /v1/admin/revocation-requests/{revocation_request_id}.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevocationAcceptedResponse'
+              example:
+                revocation_request_id: rev-123
+                status: REVOCATION_REQUESTED
+                affected_certificate_count: 12000
+                status_url: /v1/admin/revocation-requests/rev-123
+                correlation_id: 0198example
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-concurrency:
+        mechanism: server-side-authoritative-state+idempotency+transactional-CAS
+        callerIfMatchRequired: false
+      x-domain-authorization:
+        required: true
+        scopeStatus: CONFIRMED_OR_CONSOLIDATED
+        requiredScopes:
+        - certificate:revoke
+        highImpact: true
+        stepUpPolicy: policy-defined
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '409':
+        - STATE_CONFLICT
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '413': *id007
+  /v1/admin/temporary-principals:
+    post:
+      summary: Create temporary enrollment principal authorization
+      operationId: adminCreateTemporaryPrincipal
+      tags:
+      - Administration
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemporaryPrincipalCreateRequest'
+            example:
+              partner_id: P1
+              expires_at: '2026-08-21T03:00:00Z'
+              max_submissions: 5
+              reason: contingency
+      responses:
+        '201':
+          description: Temporary principal authorization created; permanent password is never returned.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+            Location:
+              $ref: '#/components/headers/Location'
+              description: 'Location of the created temporary principal authorization: /v1/admin/temporary-principals/{temporary_principal_id}.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporaryPrincipalCreateResponse'
+              example:
+                temporary_principal_id: tp-123
+                partner_id: P1
+                status: ACTIVE
+                expires_at: '2026-08-21T03:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-domain-authorization:
+        required: true
+        status: OPEN_SCOPE_NAME
+        grantedPrincipalScope: device:preonboard
+        highImpact: true
+        stepUpPolicy: policy-defined
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '409':
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '413': *id007
+  /v1/admin/temporary-principals/{id}/disable:
+    post:
+      summary: Disable temporary enrollment principal authorization
+      operationId: adminDisableTemporaryPrincipal
+      tags:
+      - Administration
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      parameters:
+      - $ref: '#/components/parameters/TemporaryPrincipalId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemporaryPrincipalDisableRequest'
+            example:
+              reason: contingency ended
+      responses:
+        '200':
+          description: Local temporary-principal authorization disabled fail-closed; external session/IdP reconciliation may
+            continue asynchronously.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemporaryPrincipalDisableResponse'
+              example:
+                temporary_principal_id: tp-123
+                status: DISABLED
+                external_reconciliation_status: PENDING
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+      x-domain-authorization:
+        required: true
+        status: OPEN_SCOPE_NAME
+        highImpact: true
+        stepUpPolicy: policy-defined
+      x-error-codes:
+        '400': *id005
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '409':
+        - IDEMPOTENCY_CONFLICT
+        '415': *id008
+        '429': *id003
+        '503': *id004
+        '413': *id007
+  /v1/admin/revocation-requests/{id}:
+    get:
+      summary: Get revocation request status
+      operationId: adminGetRevocationRequest
+      tags:
+      - Administration
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      parameters:
+      - $ref: '#/components/parameters/RevocationRequestId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Current revocation lifecycle status.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevocationRequestStatusResponse'
+              example:
+                revocation_request_id: rev-123
+                status: REVOCATION_REQUESTED
+                affected_certificate_count: 12000
+                updated_at: '2026-08-20T23:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-domain-authorization:
+        required: true
+        status: OPEN_READ_SCOPE_NAME
+        resourceScope: revocation-request
+      x-error-codes:
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '429': *id003
+        '503': *id004
+  /v1/admin/revocation-requests/{id}/certificates:
+    get:
+      summary: List certificates affected by a revocation request
+      operationId: adminListRevocationCertificates
+      tags:
+      - Administration
+      x-protocol-source: Enrollment Protocol Specification v0.2.7
+      security:
+      - AdminOIDC: []
+      parameters:
+      - $ref: '#/components/parameters/RevocationRequestId'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/PageToken'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Bounded paginated affected-certificate list derived from the server-side cascade decision.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedRevocationCertificates'
+              example:
+                items:
+                - certificate_id: cert-123
+                  status: REVOCATION_REQUESTED
+                next_page_token: opaque-next-page
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-domain-authorization:
+        required: true
+        status: OPEN_READ_SCOPE_NAME
+        resourceScope: revocation-request
+      x-error-codes:
+        '401': *id001
+        '403': *id002
+        '404': *id009
+        '429': *id003
+        '503': *id004
+components:
+  schemas:
+    ResourceId:
+      type: string
+      minLength: 1
+      maxLength: 4096
+      description: Opaque server-issued resource identifier.
+    Timestamp:
+      type: string
+      format: date-time
+    Base64Url:
+      type: string
+      minLength: 1
+      maxLength: 4096
+      pattern: ^[A-Za-z0-9_-]+$
+    Sha256Hex:
+      type: string
+      pattern: ^[0-9a-f]{64}$
+    DerBase64:
+      type: string
+      minLength: 1
+      contentEncoding: base64
+      description: Base64-encoded DER bytes.
+    CsrDerBase64:
+      type: string
+      minLength: 1
+      contentEncoding: base64
+      description: Base64-encoded PKCS#10 CSR DER. Schema limits encoded length to 87384 characters; server MUST also enforce
+        <=65536 bytes after Base64 decode.
+      x-max-decoded-bytes: 65536
+      maxLength: 87384
+    CertificateUsage:
+      type: string
+      minLength: 1
+      maxLength: 4096
+      example: PARTNER_AUTH
+    AssuranceLevel:
+      type:
+      - string
+      - 'null'
+      enum:
+      - A0
+      - A1
+      - A2
+      - A3
+      - null
+    EnrollmentOperation:
+      type: string
+      enum: &id014
+      - INITIAL
+      - RENEWAL
+      - REKEY
+    EnrollmentState:
+      type: string
+      enum: &id011
+      - CHALLENGE_ISSUED
+      - EVIDENCE_RECEIVED
+      - AUTHORIZED
+      - CA_REQUESTED
+      - CERT_ISSUED
+      - CERT_DELIVERED
+      - DEVICE_ACTIVATED
+      - COMPLETED
+      - REJECTED
+      - EXPIRED
+      - CA_FAILED
+      - INSTALL_FAILED
+      - ABORTED
+      - CERT_WITHHELD_REVOKED
+    PreOnboardingStatus:
+      type: string
+      enum: &id012
+      - PENDING_APPROVAL
+      - ENROLLMENT_READY
+      - REJECTED
+      - EXPIRED
+      - INVALIDATED
+    RevocationScope:
+      type: string
+      enum:
+      - CERTIFICATE
+      - KEY
+      - USAGE
+      - TPM_IDENTITY
+      - DEVICE
+      - PARTNER
+    RevocationStatus:
+      type: string
+      enum: &id013
+      - REVOCATION_REQUESTED
+      - CA_REVOKED
+      - CRL_PUBLISHED
+      - PARTIAL
+      - FAILED
+    PartnerAuthorization:
+      type: object
+      additionalProperties: true
+      required:
+      - partner_id
+      - display_name
+      - scopes
+      properties:
+        partner_id:
+          $ref: '#/components/schemas/ResourceId'
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        scopes:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 4096
+      x-forward-compatible-response: true
+    MyAuthorizationsResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - principal_id
+      - partners
+      properties:
+        principal_id:
+          $ref: '#/components/schemas/ResourceId'
+        partners:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/PartnerAuthorization'
+      x-forward-compatible-response: true
+    ClaimedDevice:
+      type: object
+      additionalProperties: false
+      required:
+      - hostname
+      description: Claimed/non-attested device attributes supplied before technical verification.
+      properties:
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        serial_number:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        smbios_uuid:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        manufacturer:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        model:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        tpm_present:
+          type:
+          - boolean
+          - 'null'
+        tpm_vendor:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        ek_public_hash:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+    AgentDescriptor:
+      type: object
+      additionalProperties: false
+      required:
+      - version
+      - platform
+      properties:
+        version:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        platform:
+          type: string
+          const: windows
+    PreOnboardingCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - partner_id
+      - claimed_device
+      - agent
+      properties:
+        partner_id:
+          $ref: '#/components/schemas/ResourceId'
+        claimed_device:
+          $ref: '#/components/schemas/ClaimedDevice'
+        agent:
+          $ref: '#/components/schemas/AgentDescriptor'
+    PreOnboardingCreateResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - pre_onboarding_request_id
+      - status
+      - partner_id
+      - expires_at
+      - request_access_token
+      properties:
+        pre_onboarding_request_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          const: PENDING_APPROVAL
+        partner_id:
+          $ref: '#/components/schemas/ResourceId'
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+        request_access_token:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Opaque server-generated secret. Active verifier is non-reversible. The SAME value may be reproduced
+            only by idempotent replay through the temporary encrypted Replay Capsule during its valid window. Never log or
+            place in URL.
+      x-forward-compatible-response: true
+    PreOnboardingRequest:
+      type: object
+      additionalProperties: true
+      required:
+      - pre_onboarding_request_id
+      - partner_id
+      - status
+      - claimed_device
+      - resource_version
+      - created_at
+      - expires_at
+      properties:
+        pre_onboarding_request_id:
+          $ref: '#/components/schemas/ResourceId'
+        partner_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          $ref: '#/components/schemas/PreOnboardingStatusResponse'
+        claimed_device:
+          $ref: '#/components/schemas/ClaimedDeviceView'
+        device_id:
+          oneOf:
+          - $ref: '#/components/schemas/ResourceId'
+          - type: 'null'
+        resource_version:
+          type: integer
+          minimum: 1
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+      x-forward-compatible-response: true
+    AdminDecisionRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      - expected_status
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        expected_status:
+          type: string
+          const: PENDING_APPROVAL
+    PreOnboardingApprovalResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - pre_onboarding_request_id
+      - status
+      - device_id
+      - resource_version
+      properties:
+        pre_onboarding_request_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          const: ENROLLMENT_READY
+        device_id:
+          $ref: '#/components/schemas/ResourceId'
+        resource_version:
+          type: integer
+          minimum: 1
+      x-forward-compatible-response: true
+    Challenge:
+      type: object
+      additionalProperties: true
+      required:
+      - nonce
+      - challenge_version
+      - expires_at
+      - pop_format
+      properties:
+        nonce:
+          $ref: '#/components/schemas/Base64Url'
+        challenge_version:
+          type: integer
+          minimum: 1
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+        pop_format:
+          type: string
+          const: enrollment-pop+jws
+      x-forward-compatible-response: true
+    EvidenceRequirements:
+      type: object
+      additionalProperties: true
+      required:
+      - tpm_evidence_protocol_versions
+      - minimum_assurance
+      - allowed_key_profiles
+      properties:
+        tpm_evidence_protocol_versions:
+          type: array
+          minItems: 1
+          maxItems: 128
+          items:
+            type: string
+            minLength: 1
+            maxLength: 4096
+        minimum_assurance:
+          type: string
+          enum:
+          - A0
+          - A1
+          - A2
+          - A3
+          description: Server policy output; concrete per-partner/profile values remain OPEN-005.
+        allowed_key_profiles:
+          type: array
+          minItems: 1
+          maxItems: 128
+          items:
+            type: string
+            minLength: 1
+            maxLength: 4096
+          example:
+          - ECDSA_P256
+        new_key_required:
+          type: boolean
+          description: May be present for renewal/rekey according to OPEN-006/profile policy.
+      x-forward-compatible-response: true
+    InitialEnrollmentCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - operation
+      - certificate_usage
+      properties:
+        operation:
+          type: string
+          const: INITIAL
+        certificate_usage:
+          $ref: '#/components/schemas/CertificateUsage'
+    RenewalEnrollmentCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - operation
+      - certificate_usage
+      properties:
+        operation:
+          type: string
+          const: RENEWAL
+        certificate_usage:
+          $ref: '#/components/schemas/CertificateUsage'
+    RekeyEnrollmentCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - operation
+      - certificate_usage
+      properties:
+        operation:
+          type: string
+          const: REKEY
+        certificate_usage:
+          $ref: '#/components/schemas/CertificateUsage'
+    EnrollmentCreateRequest:
+      oneOf:
+      - $ref: '#/components/schemas/InitialEnrollmentCreateRequest'
+      - $ref: '#/components/schemas/RenewalEnrollmentCreateRequest'
+      - $ref: '#/components/schemas/RekeyEnrollmentCreateRequest'
+      discriminator:
+        propertyName: operation
+        mapping:
+          INITIAL: '#/components/schemas/InitialEnrollmentCreateRequest'
+          RENEWAL: '#/components/schemas/RenewalEnrollmentCreateRequest'
+          REKEY: '#/components/schemas/RekeyEnrollmentCreateRequest'
+      description: INITIAL requires RequestAccessToken. RENEWAL/REKEY require DeviceMTLS; OpenAPI security alternatives cannot
+        express this body-dependent pairing, so servers MUST enforce it.
+    EnrollmentCreateResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - enrollment_id
+      - operation
+      - device_id
+      - state
+      - challenge
+      - evidence_requirements
+      - enrollment_access_token
+      properties:
+        enrollment_id:
+          $ref: '#/components/schemas/ResourceId'
+        operation:
+          $ref: '#/components/schemas/EnrollmentOperationResponse'
+        device_id:
+          $ref: '#/components/schemas/ResourceId'
+        state:
+          type: string
+          const: CHALLENGE_ISSUED
+        challenge:
+          $ref: '#/components/schemas/Challenge'
+        evidence_requirements:
+          $ref: '#/components/schemas/EvidenceRequirements'
+        enrollment_access_token:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Opaque server-generated secret. Active verifier is non-reversible. The SAME value may be reproduced
+            only by idempotent replay through the temporary encrypted Replay Capsule during its valid window.
+      x-forward-compatible-response: true
+    Enrollment:
+      type: object
+      additionalProperties: true
+      required:
+      - enrollment_id
+      - device_id
+      - operation
+      - certificate_usage
+      - state
+      - created_at
+      - updated_at
+      properties:
+        enrollment_id:
+          $ref: '#/components/schemas/ResourceId'
+        device_id:
+          $ref: '#/components/schemas/ResourceId'
+        operation:
+          $ref: '#/components/schemas/EnrollmentOperationResponse'
+        certificate_usage:
+          $ref: '#/components/schemas/CertificateUsage'
+        state:
+          $ref: '#/components/schemas/EnrollmentStateResponse'
+        challenge:
+          oneOf:
+          - $ref: '#/components/schemas/Challenge'
+          - type: 'null'
+        assurance_level:
+          $ref: '#/components/schemas/AssuranceLevelResponse'
+        certificate_id:
+          oneOf:
+          - $ref: '#/components/schemas/ResourceId'
+          - type: 'null'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+        retry_after_seconds:
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+      x-forward-compatible-response: true
+    JwsPop:
+      type: object
+      additionalProperties: false
+      required:
+      - format
+      - jws
+      properties:
+        format:
+          type: string
+          const: enrollment-pop+jws
+        jws:
+          type: string
+          minLength: 16
+          maxLength: 4096
+          pattern: ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$
+          description: JWS Compact Serialization. Protected header MUST contain alg=ES256 and typ=enrollment-pop+jws; jku/x5u/jwk
+            and unknown critical headers are rejected.
+    TpmEvidenceEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+      - format
+      - version
+      - payload
+      properties:
+        format:
+          type: string
+          const: enrollment-tpm-evidence
+        version:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        payload:
+          type: object
+          description: 'OPEN-004A: wire format intentionally not frozen by this OpenAPI Draft. Verifier receives expected
+            enrollment/nonce/challenge_version/SPKI hash from server context.'
+          additionalProperties: true
+          x-open-item: OPEN-004A
+    AgentAssertions:
+      type: object
+      additionalProperties: false
+      description: Non-authoritative local assertions. May contribute only to A1/LOCAL_TPM_ASSERTED; never elevate assurance
+        to A2/A3.
+      properties:
+        tpm_ready:
+          type: boolean
+        provider:
+          type: string
+          maxLength: 4096
+        hardware_backed:
+          type: boolean
+        private_key_exportable:
+          type: boolean
+    EvidenceSubmission:
+      type: object
+      additionalProperties: false
+      required:
+      - challenge_version
+      - csr_der_base64
+      - pop
+      - tpm_evidence
+      properties:
+        challenge_version:
+          type: integer
+          minimum: 1
+        csr_der_base64:
+          $ref: '#/components/schemas/CsrDerBase64'
+        pop:
+          $ref: '#/components/schemas/JwsPop'
+        tpm_evidence:
+          $ref: '#/components/schemas/TpmEvidenceEnvelope'
+        agent_assertions:
+          $ref: '#/components/schemas/AgentAssertions'
+    EvidenceAcceptedResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - enrollment_id
+      - state
+      - status_url
+      - retry_after_seconds
+      properties:
+        enrollment_id:
+          $ref: '#/components/schemas/ResourceId'
+        state:
+          type: string
+          const: EVIDENCE_RECEIVED
+        status_url:
+          type: string
+          format: uri-reference
+        retry_after_seconds:
+          type: integer
+          minimum: 0
+      x-forward-compatible-response: true
+    ChallengeRefreshRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - expected_challenge_version
+      properties:
+        expected_challenge_version:
+          type: integer
+          minimum: 1
+    ChallengeRefreshResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - enrollment_id
+      - state
+      - challenge
+      properties:
+        enrollment_id:
+          $ref: '#/components/schemas/ResourceId'
+        state:
+          type: string
+          const: CHALLENGE_ISSUED
+        challenge:
+          $ref: '#/components/schemas/Challenge'
+      x-contract-status: PROPOSED_SHAPE_DERIVED_FROM_PROTOCOL_SEMANTICS
+      x-forward-compatible-response: true
+    CertificateChainItem:
+      type: object
+      additionalProperties: true
+      required:
+      - role
+      - der_base64
+      - fingerprint_sha256
+      properties:
+        role:
+          type: string
+          const: INTERMEDIATE
+        der_base64:
+          $ref: '#/components/schemas/DerBase64'
+        fingerprint_sha256:
+          $ref: '#/components/schemas/Sha256Hex'
+      x-forward-compatible-response: true
+    ActivationInstruction:
+      type: object
+      additionalProperties: true
+      required:
+      - method
+      - complete_url
+      properties:
+        method:
+          type: string
+          const: DEVICE_MTLS
+        complete_url:
+          type: string
+          format: uri-reference
+      x-forward-compatible-response: true
+    CertificateDeliveryResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - certificate_id
+      - serial_number
+      - fingerprint_sha256
+      - leaf_der_base64
+      - installation_chain
+      - activation
+      properties:
+        certificate_id:
+          $ref: '#/components/schemas/ResourceId'
+        serial_number:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        fingerprint_sha256:
+          $ref: '#/components/schemas/Sha256Hex'
+        leaf_der_base64:
+          $ref: '#/components/schemas/DerBase64'
+        installation_chain:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/CertificateChainItem'
+        activation:
+          $ref: '#/components/schemas/ActivationInstruction'
+      x-forward-compatible-response: true
+    TrustAnchor:
+      type: object
+      additionalProperties: true
+      required:
+      - der_base64
+      - fingerprint_sha256
+      properties:
+        der_base64:
+          $ref: '#/components/schemas/DerBase64'
+        fingerprint_sha256:
+          $ref: '#/components/schemas/Sha256Hex'
+      x-forward-compatible-response: true
+    TrustBundleResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - bundle_id
+      - roots
+      - intermediates
+      - valid_from
+      properties:
+        bundle_id:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        roots:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/TrustAnchor'
+        intermediates:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/TrustAnchor'
+        valid_from:
+          $ref: '#/components/schemas/Timestamp'
+      x-forward-compatible-response: true
+    InstallationSuccessRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - installation_status
+      properties:
+        installation_status:
+          type: string
+          const: INSTALLED
+        local_assertions:
+          type: object
+          additionalProperties: false
+          properties:
+            store:
+              type: string
+              maxLength: 4096
+            provider:
+              type: string
+              maxLength: 4096
+          description: Operational assertions only; not remote proof of exact Windows store path.
+    InstallationFailureRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - installation_status
+      - error_code
+      properties:
+        installation_status:
+          type: string
+          const: FAILED
+        error_code:
+          type: string
+          const: AGENT_INSTALL_FAILED
+    EnrollmentCompleteRequest:
+      oneOf:
+      - $ref: '#/components/schemas/InstallationSuccessRequest'
+      - $ref: '#/components/schemas/InstallationFailureRequest'
+      description: INSTALLED requires DeviceMTLS using exactly the certificate issued by this enrollment. FAILED requires
+        EnrollmentAccessToken.
+      discriminator:
+        propertyName: installation_status
+        mapping:
+          INSTALLED: '#/components/schemas/InstallationSuccessRequest'
+          FAILED: '#/components/schemas/InstallationFailureRequest'
+    EnrollmentCompletionResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - enrollment_id
+      - state
+      properties:
+        enrollment_id:
+          $ref: '#/components/schemas/ResourceId'
+        state:
+          type: string
+          enum:
+          - COMPLETED
+          - INSTALL_FAILED
+        device_state:
+          type:
+          - string
+          - 'null'
+          enum:
+          - ACTIVE
+          - null
+      x-contract-status: PARTIALLY_SPECIFIED_IN_SOURCE
+      x-forward-compatible-response: true
+    RebindCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          example: TPM_REPLACED
+        notes:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+    RebindApproveRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 4096
+    RevocationCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      - scope
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          example: KEY_COMPROMISE
+        scope:
+          $ref: '#/components/schemas/RevocationScope'
+        comment:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+    RevocationAcceptedResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - revocation_request_id
+      - status
+      - affected_certificate_count
+      - status_url
+      - correlation_id
+      properties:
+        revocation_request_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          const: REVOCATION_REQUESTED
+        affected_certificate_count:
+          type: integer
+          minimum: 0
+        status_url:
+          type: string
+          format: uri-reference
+        correlation_id:
+          type: string
+          minLength: 1
+          maxLength: 4096
+      x-forward-compatible-response: true
+    RevocationRequestStatusResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - revocation_request_id
+      - status
+      - affected_certificate_count
+      - updated_at
+      properties:
+        revocation_request_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          $ref: '#/components/schemas/RevocationStatusResponse'
+        affected_certificate_count:
+          type: integer
+          minimum: 0
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+      x-forward-compatible-response: true
+    RevocationCertificateItem:
+      type: object
+      additionalProperties: true
+      required:
+      - certificate_id
+      - status
+      properties:
+        certificate_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          minLength: 1
+          maxLength: 4096
+      x-forward-compatible-response: true
+    PaginatedRevocationCertificates:
+      type: object
+      additionalProperties: true
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/RevocationCertificateItem'
+        next_page_token:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+      x-forward-compatible-response: true
+    TemporaryPrincipalCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - partner_id
+      - expires_at
+      - max_submissions
+      - reason
+      properties:
+        partner_id:
+          $ref: '#/components/schemas/ResourceId'
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+        max_submissions:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 4096
+    TemporaryPrincipalDisableRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 4096
+    PaginatedPreOnboardingRequests:
+      type: object
+      additionalProperties: true
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/PreOnboardingRequest'
+        next_page_token:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+      x-forward-compatible-response: true
+    ProblemDetail:
+      type: object
+      required:
+      - type
+      - title
+      - status
+      - error_code
+      - correlation_id
+      - retryable
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        detail:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        instance:
+          type:
+          - string
+          - 'null'
+          format: uri-reference
+        error_code:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        correlation_id:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        retryable:
+          type: boolean
+        retry_after_seconds:
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+      additionalProperties: true
+      description: RFC 9457 Problem Details plus stable domain extensions. Clients MUST use status/error_code, not human detail
+        text, for logic.
+    EnrollmentStateResponse:
+      type: string
+      x-extensible-enum: *id011
+      description: 'Known values: CHALLENGE_ISSUED, EVIDENCE_RECEIVED, AUTHORIZED, CA_REQUESTED, CERT_ISSUED, CERT_DELIVERED,
+        DEVICE_ACTIVATED, COMPLETED, REJECTED, EXPIRED, CA_FAILED, INSTALL_FAILED, ABORTED, CERT_WITHHELD_REVOKED. Clients
+        MUST treat unknown response values as non-success/unknown and remain fail-closed.'
+    PreOnboardingStatusResponse:
+      type: string
+      x-extensible-enum: *id012
+      description: 'Known values: PENDING_APPROVAL, ENROLLMENT_READY, REJECTED, EXPIRED, INVALIDATED. Clients MUST treat unknown
+        response values as non-success/unknown and remain fail-closed.'
+    RevocationStatusResponse:
+      type: string
+      x-extensible-enum: *id013
+      description: 'Known values: REVOCATION_REQUESTED, CA_REVOKED, CRL_PUBLISHED, PARTIAL, FAILED. Clients MUST treat unknown
+        response values as non-success/unknown and remain fail-closed.'
+    EnrollmentOperationResponse:
+      type: string
+      x-extensible-enum: *id014
+      description: 'Known values: INITIAL, RENEWAL, REKEY. Clients MUST treat unknown response values as non-success/unknown
+        and remain fail-closed.'
+    AssuranceLevelResponse:
+      type:
+      - string
+      - 'null'
+      x-extensible-enum:
+      - A0
+      - A1
+      - A2
+      - A3
+      description: 'Known values: A0, A1, A2, A3. Clients MUST treat unknown response values as non-success/unknown and remain
+        fail-closed.'
+    ClaimedDeviceView:
+      type: object
+      additionalProperties: true
+      required:
+      - hostname
+      description: Forward-compatible view of claimed/non-attested device attributes. Clients ignore unknown response members.
+      properties:
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        serial_number:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        smbios_uuid:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        manufacturer:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        model:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        tpm_present:
+          type:
+          - boolean
+          - 'null'
+        tpm_vendor:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+        ek_public_hash:
+          type:
+          - string
+          - 'null'
+          maxLength: 4096
+    RebindCreateResponse:
+      type: object
+      additionalProperties: true
+      x-forward-compatible-response: true
+      required:
+      - rebind_request_id
+      - device_id
+      - status
+      - resource_version
+      properties:
+        rebind_request_id:
+          $ref: '#/components/schemas/ResourceId'
+        device_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          const: PENDING_APPROVAL
+        resource_version:
+          type: integer
+          minimum: 1
+    RebindApproveResponse:
+      type: object
+      additionalProperties: true
+      x-forward-compatible-response: true
+      required:
+      - rebind_request_id
+      - status
+      - resource_version
+      properties:
+        rebind_request_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          const: APPROVED_PENDING_ATTESTATION
+        resource_version:
+          type: integer
+          minimum: 1
+    TemporaryPrincipalCreateResponse:
+      type: object
+      additionalProperties: true
+      x-forward-compatible-response: true
+      required:
+      - temporary_principal_id
+      - partner_id
+      - status
+      - expires_at
+      properties:
+        temporary_principal_id:
+          $ref: '#/components/schemas/ResourceId'
+        partner_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          const: ACTIVE
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+    TemporaryPrincipalDisableResponse:
+      type: object
+      additionalProperties: true
+      x-forward-compatible-response: true
+      required:
+      - temporary_principal_id
+      - status
+      - external_reconciliation_status
+      properties:
+        temporary_principal_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          const: DISABLED
+        external_reconciliation_status:
+          type: string
+          x-extensible-enum:
+          - PENDING
+          - COMPLETED
+          - FAILED
+          description: Status of external IdP/session reconciliation. Local authorization remains fail-closed regardless of
+            this value.
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: Server-issued resource identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    PreOnboardingRequestId:
+      name: id
+      in: path
+      required: true
+      description: Pre-onboarding request identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    EnrollmentId:
+      name: id
+      in: path
+      required: true
+      description: Enrollment transaction identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    DeviceId:
+      name: id
+      in: path
+      required: true
+      description: Logical device identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    CertificateId:
+      name: id
+      in: path
+      required: true
+      description: Immutable certificate issuance identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    RebindRequestId:
+      name: id
+      in: path
+      required: true
+      description: Device rebinding request identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    TemporaryPrincipalId:
+      name: id
+      in: path
+      required: true
+      description: Temporary principal authorization identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    RevocationRequestId:
+      name: id
+      in: path
+      required: true
+      description: Revocation request identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Printable ASCII idempotency key scoped by authenticated identity/credential scope + method + route template.
+        16..128 characters.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: ^[\x21-\x7E]{16,128}$
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: Optional caller correlation identifier; server generates one if absent.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag obtained from the current resource representation. Weak validators and wildcard are not accepted.
+        False precondition => 412 PRECONDITION_FAILED.
+      schema:
+        type: string
+        pattern: ^"[^\r\n]+"$
+        maxLength: 4096
+      example: '"4"'
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      description: Requested page size. Default 50; maximum 200.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    PageToken:
+      name: page_token
+      in: query
+      required: false
+      description: Opaque continuation token returned by a previous page.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+  headers:
+    XCorrelationId:
+      description: End-to-end correlation identifier generated or validated by the platform.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+    ETag:
+      description: Strong HTTP entity-tag for a resource representation. Weak validators (W/) are not used for protocol concurrency.
+      schema:
+        type: string
+        pattern: ^"[^\r\n]+"$
+        maxLength: 4096
+      example: '"4"'
+    RetryAfter:
+      description: Retry delay in seconds when applicable.
+      schema:
+        type: integer
+        minimum: 0
+    Location:
+      description: URI-reference of the resource created or status resource associated with the operation.
+      schema:
+        type: string
+        format: uri-reference
+        maxLength: 4096
+    WWWAuthenticate:
+      description: HTTP authentication challenge. Required on bearer-authentication 401 responses; mTLS handshake failure
+        may occur before an HTTP response exists.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 4096
+      example: Bearer
+  responses:
+    BadRequest:
+      description: Invalid request
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/invalid-request
+            title: Invalid request
+            status: 400
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: INVALID_REQUEST
+            correlation_id: 0198example
+            retryable: false
+    Unauthorized:
+      description: Authentication required
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+        WWW-Authenticate:
+          $ref: '#/components/headers/WWWAuthenticate'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/authentication-required
+            title: Authentication required
+            status: 401
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: AUTHENTICATION_REQUIRED
+            correlation_id: 0198example
+            retryable: false
+    Forbidden:
+      description: Access denied
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/scope-denied
+            title: Access denied
+            status: 403
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: SCOPE_DENIED
+            correlation_id: 0198example
+            retryable: false
+    NotFound:
+      description: Resource not found
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/resource-not-found
+            title: Resource not found
+            status: 404
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: RESOURCE_NOT_FOUND
+            correlation_id: 0198example
+            retryable: false
+    Conflict:
+      description: State conflict
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/state-conflict
+            title: State conflict
+            status: 409
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: STATE_CONFLICT
+            correlation_id: 0198example
+            retryable: false
+    Gone:
+      description: Resource expired
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/resource-expired
+            title: Resource expired
+            status: 410
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: RESOURCE_EXPIRED
+            correlation_id: 0198example
+            retryable: false
+    PayloadTooLarge:
+      description: Payload too large
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/payload-too-large
+            title: Payload too large
+            status: 413
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: PAYLOAD_TOO_LARGE
+            correlation_id: 0198example
+            retryable: false
+    UnsupportedMediaType:
+      description: Unsupported media type
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/unsupported-media-type
+            title: Unsupported media type
+            status: 415
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: UNSUPPORTED_MEDIA_TYPE
+            correlation_id: 0198example
+            retryable: false
+    UnprocessableEvidence:
+      description: Evidence invalid
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/evidence-invalid
+            title: Evidence invalid
+            status: 422
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: EVIDENCE_INVALID
+            correlation_id: 0198example
+            retryable: false
+    TooManyRequests:
+      description: Rate limited
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/rate-limited
+            title: Rate limited
+            status: 429
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: RATE_LIMITED
+            correlation_id: 0198example
+            retryable: true
+    ServiceUnavailable:
+      description: Dependency unavailable
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/dependency-unavailable
+            title: Dependency unavailable
+            status: 503
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: DEPENDENCY_UNAVAILABLE
+            correlation_id: 0198example
+            retryable: true
+    CertificateNotDeliverable:
+      description: Certificate was issued but became non-deliverable/withheld; terminal for this transaction.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/certificate-not-deliverable
+            title: Certificate not deliverable
+            status: 409
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: CERTIFICATE_NOT_DELIVERABLE
+            correlation_id: 0198example
+            retryable: false
+    IdempotencyReplayConflictOrUnavailable:
+      description: 'Idempotency failure: IDEMPOTENCY_CONFLICT is same EffectiveScope/Idempotency-Key with a different request fingerprint; IDEMPOTENCY_REPLAY_UNAVAILABLE is permanent loss of recovery capability for an authoritatively known committed originator result. Both are 409 and retryable=false.'
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/idempotency-replay-unavailable
+            title: Idempotency replay unavailable
+            status: 409
+            detail: The committed originator result remains authoritative but its secret recovery material is permanently unavailable.
+            instance: /v1/example
+            error_code: IDEMPOTENCY_REPLAY_UNAVAILABLE
+            correlation_id: 0198example
+            retryable: false
+    IdempotencyConflict:
+      description: Same Idempotency-Key reused with a different request fingerprint.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/idempotency-conflict
+            title: Idempotency conflict
+            status: 409
+            detail: Request cannot be completed under the current protocol state.
+            instance: /v1/example
+            error_code: IDEMPOTENCY_CONFLICT
+            correlation_id: 0198example
+            retryable: false
+    PreconditionFailed:
+      description: HTTP conditional request failed because If-Match did not match the current strong ETag.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://pki.example/errors/precondition-failed
+            title: Precondition failed
+            status: 412
+            detail: The supplied If-Match value does not match the current resource representation.
+            instance: /v1/example
+            error_code: PRECONDITION_FAILED
+            correlation_id: 0198example
+            retryable: false
+  securitySchemes:
+    HumanOIDC:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Human principal JWT issued/brokered by Keycloak. Agent login acquisition mechanism remains OPEN-003.
+    AdminOIDC:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Administrative OIDC bearer JWT. Domain authorization and scopes are enforced by Enrollment API.
+    TemporaryPrincipalToken:
+      type: http
+      scheme: bearer
+      description: Short-lived contingency principal credential. Concrete Keycloak/bootstrap flow is outside this contract.
+    RequestAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Opaque >=256-bit capability bound to one pre-onboarding request; single-use for INITIAL enrollment creation
+        after approval. The originator response may reproduce the SAME token only by the protocol Idempotency Replay Capsule
+        during the valid replay window; the active verifier remains non-reversible.
+    EnrollmentAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Opaque >=256-bit bearer credential bound to one enrollment for status/evidence/delivery and installation-failure
+        reporting. The originator response may reproduce the SAME token only by the protocol Idempotency Replay Capsule during
+        the valid replay window; the active verifier remains non-reversible.
+    DeviceMTLS:
+      type: mutualTLS
+      description: Device client certificate authentication terminates at the trusted Reverse Proxy. The Enrollment API server
+        stub MUST NOT infer that it directly terminates the device TLS socket. Proxy-to-API uses separate service mTLS and
+        protected certificate metadata.
+      x-terminated-at: reverse-proxy
+      x-upstream-authentication: proxy-service-mtls
+      x-device-identity-propagation: protected-metadata-with-server-side-certificate-lookup
+x-source-protocol: Enrollment Protocol Specification v0.2.7
+x-open-008: CLOSED_AT_LOGICAL_PROTOCOL_LEVEL
+x-review-disposition:
+  internal_review: OA-01..OA-10 disposed before v0.1.1
+  independent_review: Gemini OpenAPI v0.1 review disposed before v0.1.1
+  contract_sync: CR-M5.9-001 synchronizes provenance with Protocol v0.2.7 Phase-2 definitive rejection semantics (EVIDENCE_RECEIVED -> REJECTED, ISSUANCE_DENIED internal audit event); CR-M5.8-001 and CR-M5.8-002 semantics preserved; no wire-model change
+  protocol_errata: Enrollment Protocol Specification v0.2.7
+x-forward-compatibility:
+  requests: Security-sensitive mutations reject unknown request fields unless the specific OPEN payload explicitly permits
+    them.
+  responses: Clients ignore unknown response object members. Operational status/enum response values are extensible and unknown
+    values MUST NOT be treated as success.
+  go-codegen: Generated clients must preserve unknown string enum values or model extensible response states as strings.

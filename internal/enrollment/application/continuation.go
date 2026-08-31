@@ -26,6 +26,7 @@ type EvidenceAcceptanceCommand struct {
 	Fingerprint              idempotencyruntime.Fingerprint
 	Representation           []byte
 	PopNonce                 string
+	Material                 *EvaluationMaterial
 }
 
 // RefreshChallengeCommand uses CredentialBinding from the already-authenticated
@@ -140,7 +141,7 @@ func (s *Service) AcceptEvidence(ctx context.Context, cmd EvidenceAcceptanceComm
 	}
 	if err := uow.EnrollmentContinuation().StageEvidenceAcceptance(ctx, EvidenceAcceptanceWrite{
 		EnrollmentID: cmd.EnrollmentID, ExpectedChallengeVersion: cmd.ExpectedChallengeVersion,
-		Evidence: accepted, AcceptedAt: now,
+		Evidence: accepted, Material: cmd.Material, AcceptedAt: now,
 	}); err != nil {
 		return EvidenceAcceptedResult{}, mapContinuationError(err)
 	}

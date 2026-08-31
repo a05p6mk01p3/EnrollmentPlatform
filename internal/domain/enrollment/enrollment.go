@@ -59,6 +59,15 @@ func (e *Enrollment) Authorize() error {
 	return e.apply(StateAuthorized)
 }
 
+// Reject records a definitive negative Phase-2 evaluation:
+// EVIDENCE_RECEIVED -> REJECTED (Protocol v0.2.7 §22).
+// REJECTED is terminal: Authorize() cannot succeed afterward, challenge
+// refresh cannot reopen it, and no CA progression is possible. This
+// transition is guarded; only EVIDENCE_RECEIVED is a valid origin.
+func (e *Enrollment) Reject() error {
+	return e.apply(StateRejected)
+}
+
 // MarkCARequested records the authorization commit point:
 // AUTHORIZED -> CA_REQUESTED (Protocol v0.2.2 §11.1, §22).
 //

@@ -64,7 +64,7 @@ func TestTerminalStates(t *testing.T) {
 func TestTransitionMatrix(t *testing.T) {
 	expected := map[State][]State{
 		StateChallengeIssued:  {StateEvidenceReceived},
-		StateEvidenceReceived: {StateAuthorized},
+		StateEvidenceReceived: {StateAuthorized, StateRejected},
 		StateAuthorized:       {StateCARequested},
 		StateCARequested:      {StateCertIssued},
 		StateCertIssued:       {StateCertDelivered, StateCertWithheldRevoked},
